@@ -42,8 +42,10 @@
 </div>
 
 > [!IMPORTANT]
-> **License Notice**  
-> This codebase and its associated model weights are released under **[FISH AUDIO RESEARCH LICENSE](LICENSE)**. Please refer to [LICENSE](LICENSE) for more details. We will take action against any violation of the license.
+> **License Notice**
+> This codebase and its associated model weights are released under the **[Fish Audio Research License](LICENSE)**, Copyright 39 AI, INC. All Rights Reserved. Please refer to [LICENSE](LICENSE) for more details.
+>
+> Built with Fish Audio.
 
 > [!WARNING]
 > **Legal Disclaimer**  
