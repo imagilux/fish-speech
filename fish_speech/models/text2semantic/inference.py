@@ -768,6 +768,11 @@ def launch_thread_safe_queue(
                 dtype=next(model.parameters()).dtype,
             )
 
+        # Offload slow layers to CPU if requested (after caches are set up)
+        from fish_speech.utils.gpu import setup_cpu_offload
+
+        setup_cpu_offload(model, torch.device(device))
+
         init_event.set()
 
         while True:
