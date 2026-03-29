@@ -240,6 +240,11 @@ COPY --chown=${USER_UID}:${USER_GID} . .
 # Install the local package after copying source code
 RUN uv sync --extra ${UV_EXTRA} --frozen
 
+# Optional: miopen-conv-fix extension (Imagilux/miopen-conv-fix)
+# Currently disabled — causes segfaults when LLM + decoder share VRAM on gfx1201.
+# The workspace=0 bug fix works in isolation but crashes under memory pressure.
+# Waiting for upstream PyTorch fix: pytorch/pytorch#150168
+
 # Create common entrypoint script
 RUN printf '%s\n' \
     '#!/bin/bash' \

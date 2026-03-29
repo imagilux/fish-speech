@@ -51,7 +51,8 @@ if __name__ == "__main__":
     # Known issue: PyTorch ROCm passes workspace=0 to MIOpen for conv ops,
     # forcing fallback to ConvDirectNaiveConvFwd (~10-12x slower).
     # Tracked: pytorch/pytorch#150168, ROCm/MIOpen#3650, ROCm/TheRock#3077
-    # No user-side workaround available — fix must come from PyTorch HIP backend.
+    # miopen-conv-fix (Imagilux/miopen-conv-fix) extension exists but causes
+    # segfaults when LLM + decoder share VRAM. Disabled until stable.
 
     # Optional VRAM cap — set VRAM_FRACTION (0.0-1.0) to prevent system freeze
     # on memory-constrained GPUs. Unset or 0 = no cap (default).
