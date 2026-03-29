@@ -33,18 +33,21 @@ class ReferenceLoader:
         self.decoder_model: DAC
         self.encode_reference: Callable
 
-        # Define the torchaudio backend
-        # torchaudio 2.9+ removed list_audio_backends(), and 2.11+ defaults
-        # to torchcodec which may not be installed. Use soundfile as the
-        # reliable cross-platform fallback.
+        # torchaudio 2.11+ ignores the backend= parameter and forces torchcodec,
+        # which may not be installed. We bypass torchaudio.load() entirely and
+        # use soundfile directly when torchaudio's backend dispatch is broken.
+        self._use_soundfile_directly = False
         try:
-            backends = torchaudio.list_audio_backends()
-            if "ffmpeg" in backends:
-                self.backend = "ffmpeg"
-            else:
-                self.backend = "soundfile"
-        except AttributeError:
-            self.backend = "soundfile"
+            import soundfile  # noqa: F401
+            # Test if torchaudio.load actually respects backend='soundfile'
+            _test_buf = io.BytesIO()
+            import numpy as np
+            soundfile.write(_test_buf, np.zeros(100, dtype="float32"), 16000, format="WAV")
+            _test_buf.seek(0)
+            torchaudio.load(_test_buf, backend="soundfile")
+        except Exception:
+            self._use_soundfile_directly = True
+            logger.info("torchaudio backend dispatch broken, using soundfile directly")
 
     @staticmethod
     def _validate_id(id: str) -> None:
@@ -133,7 +136,16 @@ class ReferenceLoader:
             audio_data = reference_audio
             reference_audio = io.BytesIO(audio_data)
 
-        waveform, original_sr = torchaudio.load(reference_audio, backend=self.backend)
+        if self._use_soundfile_directly:
+            import soundfile
+            data, original_sr = soundfile.read(reference_audio, dtype="float32")
+            waveform = torch.from_numpy(data)
+            if waveform.ndim == 1:
+                waveform = waveform.unsqueeze(0)  # (1, samples)
+            else:
+                waveform = waveform.T  # (samples, channels) → (channels, samples)
+        else:
+            waveform, original_sr = torchaudio.load(reference_audio, backend="soundfile")
 
         if waveform.shape[0] > 1:
             waveform = torch.mean(waveform, dim=0, keepdim=True)
