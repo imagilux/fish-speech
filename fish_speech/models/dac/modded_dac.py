@@ -8,11 +8,21 @@ import torch
 from audiotools import AudioSignal
 from audiotools.ml import BaseModel
 from dac.model.base import CodecMixin
-from dac.nn.layers import Snake1d, WNConv1d, WNConvTranspose1d
+from dac.nn.layers import Snake1d
 from torch import Tensor, nn
 from torch.nn import functional as F
 from torch.nn.utils.parametrizations import weight_norm
 from torch.nn.utils.parametrize import remove_parametrizations
+
+
+# Replace dac's WNConv1d/WNConvTranspose1d which use the deprecated
+# torch.nn.utils.weight_norm with the new parametrizations API.
+def WNConv1d(*args, **kwargs):
+    return weight_norm(nn.Conv1d(*args, **kwargs))
+
+
+def WNConvTranspose1d(*args, **kwargs):
+    return weight_norm(nn.ConvTranspose1d(*args, **kwargs))
 
 
 @dataclass
