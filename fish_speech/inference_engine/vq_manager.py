@@ -14,17 +14,49 @@ class VQManager:
         self.decoder_model: DAC
         self.load_audio: Callable
 
+    # Fixed decode length — pad all inputs to this size so MIOpen only
+    # ever sees one set of conv shapes (cached after first warmup).
+    # 512 tokens ≈ 23s of audio at 21.5 Hz, covers most TTS outputs.
+    DECODE_PAD_TO = 512
+
     def decode_vq_tokens(self, codes):
         logger.info(f"VQ features: {codes.shape}")
 
         if isinstance(self.decoder_model, DAC):
+            seq_len = codes.shape[-1]
+            pad_to = max(seq_len, self.DECODE_PAD_TO)
+            # Round up to next multiple of DECODE_PAD_TO for consistent shapes
+            pad_to = ((pad_to + self.DECODE_PAD_TO - 1) // self.DECODE_PAD_TO) * self.DECODE_PAD_TO
+
+            if seq_len < pad_to:
+                # Pad with zeros (silence) on the right
+                padded = torch.zeros(
+                    (*codes.shape[:-1], pad_to),
+                    dtype=codes.dtype, device=codes.device,
+                )
+                padded[..., :seq_len] = codes
+            else:
+                padded = codes
+
+            # Free cached VRAM so MIOpen can allocate workspace for optimized
+            # conv kernels. Without this, PyTorch's allocator holds fragmented
+            # blocks and MIOpen gets workspace=0, falling back to naive convolution.
             if torch.cuda.is_available():
+                torch.cuda.empty_cache()
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
-            result = self.decoder_model.from_indices(codes[None])[0].squeeze()
+            result = self.decoder_model.from_indices(padded[None])[0].squeeze()
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
-            logger.info(f"VQ decode: {time.perf_counter() - t0:.3f}s")
+
+            # Truncate to original length (proportional to token count)
+            output_len = int(result.shape[-1] * seq_len / pad_to)
+            result = result[..., :output_len]
+
+            logger.info(
+                f"VQ decode: {time.perf_counter() - t0:.3f}s "
+                f"(padded {seq_len}→{pad_to} tokens)"
+            )
             return result
 
         raise ValueError(f"Unknown model type: {type(self.decoder_model)}")

@@ -48,6 +48,11 @@ if __name__ == "__main__":
     args = parse_args()
     args.precision = torch.half if args.half else torch.bfloat16
 
+    # Known issue: PyTorch ROCm passes workspace=0 to MIOpen for conv ops,
+    # forcing fallback to ConvDirectNaiveConvFwd (~10-12x slower).
+    # Tracked: pytorch/pytorch#150168, ROCm/MIOpen#3650, ROCm/TheRock#3077
+    # No user-side workaround available — fix must come from PyTorch HIP backend.
+
     # Optional VRAM cap — set VRAM_FRACTION (0.0-1.0) to prevent system freeze
     # on memory-constrained GPUs. Unset or 0 = no cap (default).
     vram_fraction = float(os.environ.get("VRAM_FRACTION", "0"))
@@ -116,16 +121,18 @@ if __name__ == "__main__":
         )
     )
 
-    # Warm up the DAC decoder with realistic conv kernel shapes.
-    # Voice cloning produces ~300 tokens across 10 codebooks, which triggers
-    # MIOpen exhaustive kernel search for 1D conv shapes on first run (~146s).
-    # Once cached (persisted via Docker volume), subsequent runs take ~4.5s.
+    # Warm up the DAC decoder with the fixed padded shape (DECODE_PAD_TO=512).
+    # All decode calls pad to this size, so MIOpen only needs to cache one set
+    # of conv kernel shapes. First run triggers exhaustive search (~150s),
+    # subsequent runs hit the cache (~4s).
     if isinstance(decoder_model, DAC) and args.device == "cuda":
-        logger.info("Warming up DAC decoder conv kernels (MIOpen kernel search)...")
+        from fish_speech.inference_engine.vq_manager import VQManager
+        pad_to = VQManager.DECODE_PAD_TO
+        logger.info(f"Warming up DAC decoder (fixed shape: {pad_to} tokens)...")
         t0 = time.perf_counter()
         with torch.no_grad():
             synthetic_indices = torch.randint(
-                0, 1024, (1, 10, 300), device=args.device, dtype=torch.long
+                0, 1024, (1, 10, pad_to), device=args.device, dtype=torch.long
             )
             _ = decoder_model.from_indices(synthetic_indices)
             torch.cuda.synchronize()
