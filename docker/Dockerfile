@@ -214,10 +214,10 @@ RUN set -eux; \
         chown -R ${USERNAME}:${USERNAME} /app /home/${USERNAME}/.cache; \
     fi
 
-# Create references directory with proper permissions for the non-root user
-RUN mkdir -p /app/references \
-    && chown -R ${USER_UID}:${USER_GID} /app/references \
-    && chmod 755 /app/references
+# Create references and cache directories with proper permissions for the non-root user
+RUN mkdir -p /app/references /app/.cache/miopen /app/.config/miopen /app/.triton \
+    && chown -R ${USER_UID}:${USER_GID} /app/references /app/.cache/miopen /app/.config/miopen /app/.triton \
+    && chmod 755 /app/references /app/.cache/miopen /app/.config/miopen /app/.triton
 
 # Set working directory
 WORKDIR /app

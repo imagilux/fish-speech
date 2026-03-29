@@ -22,13 +22,19 @@ services:
         soft: 65536
         hard: 65536
     volumes:
-      - miopen-cache:/home/fish/.config/miopen
+      - miopen-kernels:/app/.cache/miopen
+      - miopen-userdb:/app/.config/miopen
+      - triton-cache:/app/.triton
     environment:
       HSA_ENABLE_SDMA: "0"
       GPU_MAX_HW_QUEUES: "1"
       HSA_USE_SVM: "0"
       PYTORCH_HIP_ALLOC_CONF: "garbage_collection_threshold:0.7,max_split_size_mb:4096"
       MIOPEN_FIND_MODE: "${MIOPEN_FIND_MODE:-3}"
+      MIOPEN_CUSTOM_CACHE_DIR: /app/.cache/miopen
+      MIOPEN_USER_DB_PATH: /app/.config/miopen
+      TRITON_CACHE_DIR: /app/.triton
+      TORCHINDUCTOR_CACHE_DIR: /app/.triton/inductor
       VRAM_FRACTION: "${VRAM_FRACTION:-0}"
       MAX_SEQ_LEN: "${MAX_SEQ_LEN:-32768}"
       OFFLOAD_WEIGHTS_TO_CPU: "${OFFLOAD_WEIGHTS_TO_CPU:-false}"
@@ -49,16 +55,24 @@ services:
         soft: 65536
         hard: 65536
     volumes:
-      - miopen-cache:/home/fish/.config/miopen
+      - miopen-kernels:/app/.cache/miopen
+      - miopen-userdb:/app/.config/miopen
+      - triton-cache:/app/.triton
     environment:
       HSA_ENABLE_SDMA: "0"
       GPU_MAX_HW_QUEUES: "1"
       HSA_USE_SVM: "0"
       PYTORCH_HIP_ALLOC_CONF: "garbage_collection_threshold:0.7,max_split_size_mb:4096"
       MIOPEN_FIND_MODE: "${MIOPEN_FIND_MODE:-3}"
+      MIOPEN_CUSTOM_CACHE_DIR: /app/.cache/miopen
+      MIOPEN_USER_DB_PATH: /app/.config/miopen
+      TRITON_CACHE_DIR: /app/.triton
+      TORCHINDUCTOR_CACHE_DIR: /app/.triton/inductor
       VRAM_FRACTION: "${VRAM_FRACTION:-0}"
       MAX_SEQ_LEN: "${MAX_SEQ_LEN:-32768}"
       OFFLOAD_WEIGHTS_TO_CPU: "${OFFLOAD_WEIGHTS_TO_CPU:-false}"
 
 volumes:
-  miopen-cache:
+  miopen-kernels:
+  miopen-userdb:
+  triton-cache:
