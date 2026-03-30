@@ -47,6 +47,21 @@ def load_model(config_name, checkpoint_path, device="cuda", precision=None):
         model.to(device)
 
     logger.info(f"Loaded model: {result}")
+
+    # Patch decoder conv layers to bypass PyTorch's workspace=0 bug on ROCm.
+    # PyTorch 2.11 fixed the bug for small workspace sizes, but large conv layers
+    # in the decoder (spatial dims up to 1M) need >1 GB workspace and still fall
+    # back to ConvDirectNaive (~98% of decode time). miopen-conv-fix allocates
+    # workspace properly via MIOpen's Immediate Mode API.
+    if device == "cuda" and hasattr(model, "decoder"):
+        try:
+            import miopen_conv_fix
+
+            count = miopen_conv_fix.patch_module(model.decoder)
+            logger.info(f"miopen-conv-fix: patched {count} conv layers in decoder")
+        except ImportError:
+            pass
+
     return model
 
 

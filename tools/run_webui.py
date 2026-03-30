@@ -1,5 +1,4 @@
 import os
-import time
 from argparse import ArgumentParser
 from pathlib import Path
 
@@ -11,7 +10,6 @@ pyrootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
 from fish_speech.inference_engine import TTSInferenceEngine
 from fish_speech.models.dac.inference import load_model as load_decoder_model
-from fish_speech.models.dac.modded_dac import DAC
 from fish_speech.models.text2semantic.inference import launch_thread_safe_queue
 from fish_speech.utils.gpu import auto_detect_rocm_gfx, check_vram_and_advise
 from fish_speech.utils.schema import ServeTTSRequest
@@ -48,11 +46,10 @@ if __name__ == "__main__":
     args = parse_args()
     args.precision = torch.half if args.half else torch.bfloat16
 
-    # Known issue: PyTorch ROCm passes workspace=0 to MIOpen for conv ops,
-    # forcing fallback to ConvDirectNaiveConvFwd (~10-12x slower).
+    # Known issue: PyTorch ROCm passes workspace=0 to MIOpen for conv ops.
+    # miopen-conv-fix extension (Imagilux/miopen-conv-fix) segfaults on gfx1201
+    # even with VRAM freed — likely invalid MIOpen descriptor/algo for RDNA 4.
     # Tracked: pytorch/pytorch#150168, ROCm/MIOpen#3650, ROCm/TheRock#3077
-    # miopen-conv-fix (Imagilux/miopen-conv-fix) extension exists but causes
-    # segfaults when LLM + decoder share VRAM. Disabled until stable.
 
     # Optional VRAM cap — set VRAM_FRACTION (0.0-1.0) to prevent system freeze
     # on memory-constrained GPUs. Unset or 0 = no cap (default).
@@ -122,26 +119,7 @@ if __name__ == "__main__":
         )
     )
 
-    # Warm up the DAC decoder with the fixed padded shape (DECODE_PAD_TO=512).
-    # All decode calls pad to this size, so MIOpen only needs to cache one set
-    # of conv kernel shapes. First run triggers exhaustive search (~150s),
-    # subsequent runs hit the cache (~4s).
-    if isinstance(decoder_model, DAC) and args.device == "cuda":
-        from fish_speech.inference_engine.vq_manager import VQManager
-        pad_to = VQManager.DECODE_PAD_TO
-        logger.info(f"Warming up DAC decoder (fixed shape: {pad_to} tokens)...")
-        t0 = time.perf_counter()
-        with torch.no_grad():
-            synthetic_indices = torch.randint(
-                0, 1024, (1, 10, pad_to), device=args.device, dtype=torch.long
-            )
-            _ = decoder_model.from_indices(synthetic_indices)
-            torch.cuda.synchronize()
-        del synthetic_indices, _
-        torch.cuda.empty_cache()
-        logger.info(f"DAC decoder warmup done in {time.perf_counter() - t0:.1f}s")
-
-    logger.info("Warming up done, launching the web UI...")
+    logger.info("Warmup done, launching the web UI...")
 
     # Get the inference function with the immutable arguments
     inference_fct = get_inference_wrapper(inference_engine)

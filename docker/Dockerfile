@@ -240,10 +240,13 @@ COPY --chown=${USER_UID}:${USER_GID} . .
 # Install the local package after copying source code
 RUN uv sync --extra ${UV_EXTRA} --frozen
 
-# Optional: miopen-conv-fix extension (Imagilux/miopen-conv-fix)
-# Currently disabled — causes segfaults when LLM + decoder share VRAM on gfx1201.
-# The workspace=0 bug fix works in isolation but crashes under memory pressure.
-# Waiting for upstream PyTorch fix: pytorch/pytorch#150168
+# miopen-conv-fix: bypass PyTorch's workspace=0 bug for large conv layers on ROCm.
+# PyTorch 2.11 fixed the bug for small workspace sizes, but the DAC decoder's late
+# conv layers (spatial dims up to 1M) need >1 GB workspace and still fall back to
+# ConvDirectNaive. This extension uses MIOpen's Immediate Mode API with per-solution
+# validation to select fast GEMM kernels safely. No-op on CUDA/CPU.
+# See: pytorch/pytorch#150168, github.com/Imagilux/miopen-conv-fix
+RUN uv pip install --no-deps miopen-conv-fix@git+https://github.com/Imagilux/miopen-conv-fix.git@main
 
 # Create common entrypoint script
 RUN printf '%s\n' \
