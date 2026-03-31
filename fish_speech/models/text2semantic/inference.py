@@ -806,17 +806,21 @@ class LlamaQueue:
         self._model_ref = model_ref
         self._device = device
         self._offloaded = False
-        self._worker_done = worker_done_event  # set by worker after each request
+        self._worker_done = worker_done_event
+
+    @property
+    def device(self):
+        return self._device
+
+    @property
+    def offloaded(self):
+        return self._offloaded
 
     def put(self, item):
         self.queue.put(item)
 
     def run_on_worker(self, fn):
-        """Execute fn on the worker thread and return the result.
-
-        All GPU operations (offload, decode, reload) should go through this
-        to avoid cross-thread HIP context corruption on RDNA 4.
-        """
+        """Execute fn on the worker thread and return the result."""
         self._worker_done.wait()
         result_queue = queue.Queue()
         self.queue.put(WorkerCommand(fn, result_queue))
@@ -828,21 +832,15 @@ class LlamaQueue:
     @staticmethod
     def _move_all_tensors(model, device):
         """Move model + any ad-hoc tensor attributes (not just params/buffers)."""
+        target = torch.device(device)
         with torch.inference_mode(False):
-            model.to(device)
+            model.to(target)
         # Move ad-hoc tensor attributes that nn.Module.to() misses
-        for attr_name in dir(model):
-            if attr_name.startswith("_"):
-                obj = getattr(model, attr_name, None)
-                if isinstance(obj, torch.Tensor) and obj.device != torch.device(device):
-                    setattr(model, attr_name, obj.to(device))
-            try:
-                obj = getattr(model, attr_name, None)
-            except Exception:
-                continue
+        # (e.g. fixed_temperature, fixed_top_p created in init_model)
+        for attr_name, obj in vars(model).items():
             if isinstance(obj, torch.Tensor) and not isinstance(obj, torch.nn.Parameter):
-                if obj.device != torch.device(device):
-                    setattr(model, attr_name, obj.to(device))
+                if obj.device != target:
+                    setattr(model, attr_name, obj.to(target))
 
     def offload_to_cpu(self):
         """Move LLM to CPU via the worker thread."""
@@ -872,7 +870,6 @@ class LlamaQueue:
 
         self.run_on_worker(_reload)
         self._offloaded = False
-        self._worker_done.clear()  # reset for next generation cycle
         logger.info("LLM reloaded to GPU")
 
 
@@ -929,6 +926,7 @@ def launch_thread_safe_queue(
                 continue
 
             # GenerateRequest: LLM token generation
+            worker_done_event.clear()  # Mark busy before generation starts
             kwargs = item.request
             response_queue = item.response_queue
 

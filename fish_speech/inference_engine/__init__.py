@@ -61,10 +61,8 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
             set_seed(req.seed)
             logger.warning(f"set seed: {req.seed}")
 
-        # Ensure LLM is on GPU for generation. It may have been offloaded
-        # during startup (to make room for decoder loading) or left offloaded
-        # if reload was skipped on the previous request.
-        if hasattr(self.llama_queue, "_offloaded") and self.llama_queue._offloaded:
+        # Lazy reload: only move LLM to GPU when actually needed
+        if hasattr(self.llama_queue, "offloaded") and self.llama_queue.offloaded:
             self.llama_queue.reload_to_gpu()
 
         # Get the symbolic tokens from the LLAMA model
@@ -116,13 +114,11 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
             else:
                 break
 
-        # Offload LLM to free VRAM for the decoder subprocess's workspace.
-        # With subprocess decode on RDNA 4, this also ensures the parent's
-        # GPU memory pressure is low while the subprocess runs MIOpen kernels.
-        llm_offloaded = False
-        if results and hasattr(self.llama_queue, "offload_to_cpu"):
+        # Offload LLM only in subprocess mode — frees VRAM so the decoder
+        # subprocess has room for MIOpen workspace. In-process mode keeps
+        # LLM on GPU to avoid unnecessary PCIe round-trip.
+        if results and self.subprocess_active and hasattr(self.llama_queue, "offload_to_cpu"):
             self.llama_queue.offload_to_cpu()
-            llm_offloaded = True
 
         # Decode all segments
         segments = []
@@ -135,10 +131,6 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
                     error=None,
                 )
             segments.append(segment)
-
-        # Reload LLM for the next request
-        if llm_offloaded:
-            self.llama_queue.reload_to_gpu()
 
         # Clean up
         if torch.cuda.is_available():
@@ -172,7 +164,7 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
 
         # Prepare the request
         request = dict(
-            device=self.llama_queue._device,
+            device=self.llama_queue.device,
             max_new_tokens=req.max_new_tokens,
             text=req.text,
             top_p=req.top_p,

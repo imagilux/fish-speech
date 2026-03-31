@@ -9,15 +9,13 @@ from fish_speech.models.dac.inference import load_model as load_decoder_model
 from fish_speech.models.text2semantic.inference import launch_thread_safe_queue
 from fish_speech.utils.gpu import apply_vram_fraction, auto_detect_rocm_gfx, check_vram_and_advise
 from fish_speech.utils.schema import ServeTTSRequest
-from tools.server.inference import inference_wrapper as inference
 
 
 def _should_use_subprocess_decoder():
-    """Decide whether to use a subprocess for DAC decode.
+    """Auto-detect RDNA 4 where subprocess decoder is needed.
 
-    On RDNA 4 (gfx1201), MIOpen conv kernels page-fault after LLM generation
-    corrupts the parent process's HIP page tables. A subprocess with its own
-    HIP context avoids this entirely.
+    On gfx1201/gfx1200, MIOpen conv kernels page-fault after LLM generation
+    due to a HIP driver bug. A subprocess with its own HIP context avoids this.
     """
     if not torch.cuda.is_available():
         return False
@@ -26,7 +24,6 @@ def _should_use_subprocess_decoder():
         return True
     if env in ("false", "0"):
         return False
-    # Auto: enable on RDNA 4 where the page fault occurs
     props = torch.cuda.get_device_properties(0)
     arch = getattr(props, "gcnArchName", "")
     return "gfx1201" in arch or "gfx1200" in arch
@@ -48,7 +45,6 @@ class ModelManager:
         self.device = device
         self.half = half
         self.compile = compile
-
         self.precision = torch.half if half else torch.bfloat16
 
         auto_detect_rocm_gfx()
@@ -62,17 +58,28 @@ class ModelManager:
             self.device = "cpu"
             logger.info("CUDA is not available, running on CPU.")
 
-        # Load models sequentially — offload LLM before loading decoder so
-        # they never coexist on GPU simultaneously during startup.
+        use_subprocess = _should_use_subprocess_decoder()
+
+        # Load models sequentially — offload LLM before loading decoder
+        # so they never coexist on GPU simultaneously during startup.
         self.load_llama_model(
             llama_checkpoint_path, self.device, self.precision, self.compile, self.mode
         )
-        if self.device == "cuda" and hasattr(self, "llama_queue") and hasattr(self.llama_queue, "offload_to_cpu"):
+        if self.device == "cuda" and hasattr(self.llama_queue, "offload_to_cpu"):
             self.llama_queue.offload_to_cpu()
 
         self.load_decoder_model(
             decoder_config_name, decoder_checkpoint_path, self.device, self.precision
         )
+
+        # Move parent DAC to CPU BEFORE launching subprocess — gives the
+        # subprocess full VRAM for model load + MIOpen warmup.
+        if use_subprocess:
+            self.decoder_model.to("cpu")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            logger.info("Parent DAC model moved to CPU (decode via subprocess)")
+
         self.tts_inference_engine = TTSInferenceEngine(
             llama_queue=self.llama_queue,
             decoder_model=self.decoder_model,
@@ -80,9 +87,7 @@ class ModelManager:
             compile=self.compile,
         )
 
-        # On RDNA 4: launch a persistent subprocess for DAC decode with its
-        # own HIP context, isolated from LLM generation's memory state.
-        if _should_use_subprocess_decoder():
+        if use_subprocess:
             logger.info("RDNA 4 detected — launching decoder subprocess")
             self.tts_inference_engine.launch_decoder_subprocess(
                 config_name=decoder_config_name,
@@ -90,12 +95,7 @@ class ModelManager:
                 device=self.device,
                 precision=self.precision,
             )
-            atexit.register(self.tts_inference_engine._shutdown_decoder_subprocess)
-            # Move parent's DAC to CPU — decode goes through subprocess.
-            # Frees ~2GB VRAM for LLM generation headroom.
-            self.decoder_model.to("cpu")
-            torch.cuda.empty_cache()
-            logger.info("Parent DAC model moved to CPU (decode via subprocess)")
+            atexit.register(self.tts_inference_engine.shutdown_decoder_subprocess)
         else:
             logger.info("Using in-process decoder")
 
@@ -123,18 +123,3 @@ class ModelManager:
             precision=precision,
         )
         logger.info("Decoder model loaded.")
-
-    def warm_up(self, tts_inference_engine) -> None:
-        request = ServeTTSRequest(
-            text="Hello world.",
-            references=[],
-            reference_id=None,
-            max_new_tokens=1024,
-            chunk_length=200,
-            top_p=0.7,
-            repetition_penalty=1.2,
-            temperature=0.7,
-            format="wav",
-        )
-        list(inference(request, tts_inference_engine))
-        logger.info("Models warmed up.")
