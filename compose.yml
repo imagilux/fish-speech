@@ -18,8 +18,7 @@ services:
   webui:
     build:
       context: .
-      dockerfile: docker/Dockerfile
-      target: webui
+      dockerfile: docker/Dockerfile.webui
       args:
         UV_VERSION: ${UV_VERSION:-0.8.15}
         PY_VER: ${PY_VER:-3.12}

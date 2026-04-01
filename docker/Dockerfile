@@ -1,63 +1,16 @@
-# docker/Dockerfile
-
-# IMPORTANT: The docker images do not contain the checkpoints. You need to mount the checkpoints to the container.
-
-# Build the image:
-#   docker build \
-#       --platform linux/amd64 \
-#       -f docker/Dockerfile \
-#       --build-arg BACKEND=[cuda, cpu, rocm] \
-#       --target [webui, server] \
-#       -t fish-speech-[webui, server]:[cuda, cpu, rocm] .
-
-# e.g. for building the webui:
-#   docker build \
-#       --platform linux/amd64 \
-#       -f docker/Dockerfile \
-#       --build-arg BACKEND=cuda \
-#       --target webui \
-#       -t fish-speech-webui:cuda .
-
-# e.g. for building the server:
-#   docker build \
-#       --platform linux/amd64 \
-#       -f docker/Dockerfile \
-#       --build-arg BACKEND=cuda \
-#       --target server \
-#       -t fish-speech-server:cuda .
-
-
-
-# Multi-platform build:
-#   docker buildx build \
-#       --platform linux/amd64,linux/arm64 \
-#       -f docker/Dockerfile \
-#       --build-arg BACKEND=cpu \
-#       --target webui \
-#       -t fish-speech-webui:cpu .
-
-
-# Running the image interactively:
-#   docker run \
-#       --gpus all \
-#       -v /path/to/fish-speech/checkpoints:/app/checkpoints \
-#       -e COMPILE=1 \ ... or -e COMPILE=0 \
-#       -it fish-speech-[webui, server]:[cuda, cpu]
-
-# E.g. running the webui:
-#   docker run \
-#       --gpus all \
-#       -v ./checkpoints:/app/checkpoints \
-#       -e COMPILE=1 \
-#       -p 7860:7860 \
-#       fish-speech-webui:cuda
-
-# E.g. running the server:
-#   docker run \
-#       --gpus all \
-#       -v ./checkpoints:/app/checkpoints \
-#       -p 8080:8080 \
-#       -it fish-speech-server:cuda
+# docker/Dockerfile — API server and dev images (GPU + PyTorch + models).
+# For the lightweight WebUI image, see docker/Dockerfile.webui.
+#
+# IMPORTANT: Images do not contain checkpoints. Mount them at runtime.
+#
+# Build the server:
+#   docker build -f docker/Dockerfile --build-arg BACKEND=rocm --target server -t fish-speech-server:rocm .
+#
+# Build the dev image:
+#   docker build -f docker/Dockerfile --build-arg BACKEND=rocm --target dev -t fish-speech-dev:rocm .
+#
+# Run the server:
+#   docker run --gpus all -v ./checkpoints:/app/checkpoints -p 8080:8080 fish-speech-server:rocm
 
 
 # Select the specific cuda version (see https://hub.docker.com/r/nvidia/cuda/)
@@ -317,54 +270,6 @@ RUN printf '%s\n' \
 ##############################################################
 # App stages
 ##############################################################
-
-# Gradio WebUI — lightweight image, no GPU / PyTorch / models.
-# Only Gradio + httpx + soundfile for the thin API client.
-FROM python:${PY_VER}-slim AS webui
-
-ARG UV_VERSION
-ARG GRADIO_SERVER_NAME="0.0.0.0"
-ARG GRADIO_SERVER_PORT=7860
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    GRADIO_SERVER_NAME=${GRADIO_SERVER_NAME} \
-    GRADIO_SERVER_PORT=${GRADIO_SERVER_PORT} \
-    API_URL="http://server:8080"
-
-# libsndfile for soundfile, curl for healthcheck
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libsndfile1 curl \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=uv-bin /uv /bin/uv
-
-WORKDIR /app
-
-RUN uv pip install --system --no-cache \
-    "gradio>5.0" httpx soundfile numpy loguru pyrootutils
-
-# Copy only the webui source and i18n translations
-COPY fish_speech/i18n/ fish_speech/i18n/
-COPY tools/webui/ tools/webui/
-COPY tools/run_webui.py tools/
-COPY .project-root .
-
-EXPOSE ${GRADIO_SERVER_PORT}
-
-RUN printf '%s\n' \
-    '#!/bin/bash' \
-    'set -euo pipefail' \
-    'echo "[$(date +"%Y-%m-%d %H:%M:%S")] Starting Fish Speech WebUI (API client)..."' \
-    'echo "[$(date +"%Y-%m-%d %H:%M:%S")] API server: ${API_URL}"' \
-    'echo "[$(date +"%Y-%m-%d %H:%M:%S")] Gradio: ${GRADIO_SERVER_NAME}:${GRADIO_SERVER_PORT}"' \
-    'exec python tools/run_webui.py --api-url "${API_URL}"' \
-    > /app/start_webui.sh && chmod +x /app/start_webui.sh
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:${GRADIO_SERVER_PORT}/ || exit 1
-
-ENTRYPOINT ["/app/start_webui.sh"]
 
 # API Server
 FROM app-base AS server
