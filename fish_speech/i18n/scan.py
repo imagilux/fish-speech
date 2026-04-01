@@ -18,8 +18,8 @@ def extract_i18n_strings(node):
         and node.func.id == "i18n"
     ):
         for arg in node.args:
-            if isinstance(arg, ast.Str):
-                i18n_strings.append(arg.s)
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                i18n_strings.append(arg.value)
 
     for child_node in ast.iter_child_nodes(node):
         i18n_strings.extend(extract_i18n_strings(child_node))
