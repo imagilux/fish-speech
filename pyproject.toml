@@ -136,6 +136,12 @@ name = "pytorch-rocm72"
 url = "https://download.pytorch.org/whl/rocm7.2"
 explicit = true
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-httpx>=0.30",
+]
+
 [build-system]
 requires = ["setuptools", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
@@ -144,3 +150,7 @@ build-backend = "setuptools.build_meta"
 packages = ["fish_speech", "tools"]
 
 [tool.setuptools_scm]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
