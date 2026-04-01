@@ -3,15 +3,25 @@ from typing import Callable
 import gradio as gr
 
 from fish_speech.i18n import i18n
+from tools.webui.inference import list_references
 from tools.webui.variables import HEADER_MD, TEXTBOX_PLACEHOLDER
 
 
 _VALID_THEMES = {"light", "dark"}
 
+_NONE_CHOICE = ""  # empty string = no reference selected
 
-def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
+
+def build_app(
+    inference_fct: Callable, theme: str = "light", api_url: str = ""
+) -> gr.Blocks:
     if theme not in _VALID_THEMES:
         theme = "light"
+
+    def refresh_references() -> gr.update:
+        ids = list_references(api_url)
+        choices = [_NONE_CHOICE] + ids
+        return gr.update(choices=choices, value=_NONE_CHOICE)
 
     with gr.Blocks(theme=gr.themes.Base()) as app:
         gr.Markdown(HEADER_MD)
@@ -91,9 +101,17 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
                                     )
                                 )
                             with gr.Row():
-                                reference_id = gr.Textbox(
-                                    label=i18n("Reference ID"),
-                                    placeholder="Leave empty to use uploaded references",
+                                reference_id = gr.Dropdown(
+                                    label=i18n("Reference Voice"),
+                                    choices=[_NONE_CHOICE],
+                                    value=_NONE_CHOICE,
+                                    allow_custom_value=True,
+                                    info="Select a pre-loaded voice or type a custom ID",
+                                )
+                                refresh_btn = gr.Button(
+                                    value="\U0001f504",  # 🔄
+                                    scale=0,
+                                    min_width=48,
                                 )
 
                             with gr.Row():
@@ -136,6 +154,16 @@ def build_app(inference_fct: Callable, theme: str = "light") -> gr.Blocks:
                             value="\U0001f3a7 " + i18n("Generate"),
                             variant="primary",
                         )
+
+        # Refresh reference list on button click
+        refresh_btn.click(
+            refresh_references,
+            inputs=[],
+            outputs=[reference_id],
+        )
+
+        # Auto-refresh reference list on page load
+        app.load(refresh_references, inputs=[], outputs=[reference_id])
 
         # Submit
         generate.click(

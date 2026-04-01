@@ -82,6 +82,19 @@ def build_html_error_message(error: Any) -> str:
     """
 
 
+def list_references(api_url: str) -> list[str]:
+    """Fetch available reference voice IDs from the API server."""
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.get(f"{api_url}/v1/references/list")
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("reference_ids", [])
+    except Exception as e:
+        logger.warning(f"Failed to fetch reference list: {e}")
+    return []
+
+
 def get_inference_wrapper(api_url: str) -> Callable:
     """Return inference function with the API URL baked in."""
     return partial(inference_wrapper, api_url=api_url)

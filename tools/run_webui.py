@@ -26,5 +26,5 @@ if __name__ == "__main__":
 
     inference_fct = get_inference_wrapper(args.api_url)
 
-    app = build_app(inference_fct, args.theme)
+    app = build_app(inference_fct, args.theme, api_url=args.api_url)
     app.launch()
