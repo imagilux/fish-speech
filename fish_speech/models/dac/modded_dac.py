@@ -840,7 +840,7 @@ class DAC(BaseModel, CodecMixin):
 
         self.latent_dim = latent_dim
 
-        self.hop_length = np.prod(encoder_rates)
+        self.hop_length = math.prod(encoder_rates)
         self.encoder = Encoder(
             encoder_dim,
             encoder_rates,
