@@ -318,30 +318,47 @@ RUN printf '%s\n' \
 # App stages
 ##############################################################
 
-# Gradio WebUI (lightweight — no GPU, connects to API server)
-FROM app-base AS webui
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+# Gradio WebUI — lightweight image, no GPU / PyTorch / models.
+# Only Gradio + httpx + soundfile for the thin API client.
+FROM python:${PY_VER}-slim AS webui
 
+ARG UV_VERSION
 ARG GRADIO_SERVER_NAME="0.0.0.0"
 ARG GRADIO_SERVER_PORT=7860
 
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    GRADIO_SERVER_NAME=${GRADIO_SERVER_NAME} \
+    GRADIO_SERVER_PORT=${GRADIO_SERVER_PORT} \
+    API_URL="http://server:8080"
+
+# libsndfile for soundfile, curl for healthcheck
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libsndfile1 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=uv-bin /uv /bin/uv
+
+WORKDIR /app
+
+RUN uv pip install --system --no-cache \
+    "gradio>5.0" httpx soundfile numpy loguru pyrootutils
+
+# Copy only the webui source and i18n translations
+COPY fish_speech/i18n/ fish_speech/i18n/
+COPY tools/webui/ tools/webui/
+COPY tools/run_webui.py tools/
+COPY .project-root .
+
 EXPOSE ${GRADIO_SERVER_PORT}
 
-ENV GRADIO_SERVER_NAME=${GRADIO_SERVER_NAME}
-ENV GRADIO_SERVER_PORT=${GRADIO_SERVER_PORT}
-ENV API_URL="http://server:8080"
-
-# Create webui entrypoint
 RUN printf '%s\n' \
     '#!/bin/bash' \
-    'source /app/common.sh' \
-    '' \
-    'log "Starting Fish Speech WebUI (API client)..."' \
-    'log "API server: ${API_URL}"' \
-    'log "Gradio: ${GRADIO_SERVER_NAME}:${GRADIO_SERVER_PORT}"' \
-    '' \
-    'exec uv run --no-sync tools/run_webui.py \' \
-    '  --api-url "${API_URL}"' \
+    'set -euo pipefail' \
+    'echo "[$(date +"%Y-%m-%d %H:%M:%S")] Starting Fish Speech WebUI (API client)..."' \
+    'echo "[$(date +"%Y-%m-%d %H:%M:%S")] API server: ${API_URL}"' \
+    'echo "[$(date +"%Y-%m-%d %H:%M:%S")] Gradio: ${GRADIO_SERVER_NAME}:${GRADIO_SERVER_PORT}"' \
+    'exec python tools/run_webui.py --api-url "${API_URL}"' \
     > /app/start_webui.sh && chmod +x /app/start_webui.sh
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \

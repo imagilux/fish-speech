@@ -16,11 +16,13 @@ services:
       - "${API_PORT:-8080}:8080"
 
   webui:
-    extends:
-      file: compose.base.yml
-      service: app-base
     build:
+      context: .
+      dockerfile: docker/Dockerfile
       target: webui
+      args:
+        UV_VERSION: ${UV_VERSION:-0.8.15}
+        PY_VER: ${PY_VER:-3.12}
     environment:
       API_URL: http://server:8080
     depends_on:
