@@ -18,10 +18,12 @@ def build_app(
     if theme not in _VALID_THEMES:
         theme = "light"
 
-    def refresh_references() -> gr.update:
+    def refresh_references(current: str = _NONE_CHOICE) -> gr.update:
         ids = list_references(api_url)
         choices = [_NONE_CHOICE] + ids
-        return gr.update(choices=choices, value=_NONE_CHOICE)
+        # Preserve current selection if it's still in the list
+        value = current if current in choices else _NONE_CHOICE
+        return gr.update(choices=choices, value=value)
 
     with gr.Blocks(theme=gr.themes.Base()) as app:
         gr.Markdown(HEADER_MD)
@@ -155,10 +157,10 @@ def build_app(
                             variant="primary",
                         )
 
-        # Refresh reference list on button click
+        # Refresh reference list on button click (preserves current selection)
         refresh_btn.click(
             refresh_references,
-            inputs=[],
+            inputs=[reference_id],
             outputs=[reference_id],
         )
 
