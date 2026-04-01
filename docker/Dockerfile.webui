@@ -1,0 +1,60 @@
+# docker/Dockerfile.webui
+#
+# Lightweight Gradio WebUI — thin HTTP client for the Fish Speech API server.
+# No GPU, no PyTorch, no models. ~500MB vs ~29GB for the server image.
+#
+# Build:
+#   docker build -f docker/Dockerfile.webui -t fish-speech-webui .
+#
+# Run:
+#   docker run -p 7860:7860 -e API_URL=http://host.docker.internal:8080 fish-speech-webui
+
+ARG PY_VER=3.12
+ARG UV_VERSION=0.8.15
+
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv-bin
+
+FROM python:${PY_VER}-slim
+
+ARG GRADIO_SERVER_NAME="0.0.0.0"
+ARG GRADIO_SERVER_PORT=7860
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    GRADIO_SERVER_NAME=${GRADIO_SERVER_NAME} \
+    GRADIO_SERVER_PORT=${GRADIO_SERVER_PORT} \
+    API_URL="http://server:8080"
+
+# libsndfile for soundfile, curl for healthcheck
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libsndfile1 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=uv-bin /uv /bin/uv
+
+WORKDIR /app
+
+RUN uv pip install --system --no-cache \
+    "gradio>5.0" httpx soundfile numpy loguru pyrootutils
+
+# Copy only the webui source and i18n translations
+COPY fish_speech/i18n/ fish_speech/i18n/
+COPY tools/webui/ tools/webui/
+COPY tools/run_webui.py tools/
+COPY .project-root .
+
+EXPOSE ${GRADIO_SERVER_PORT}
+
+RUN printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'echo "[$(date +"%Y-%m-%d %H:%M:%S")] Starting Fish Speech WebUI (API client)..."' \
+    'echo "[$(date +"%Y-%m-%d %H:%M:%S")] API server: ${API_URL}"' \
+    'echo "[$(date +"%Y-%m-%d %H:%M:%S")] Gradio: ${GRADIO_SERVER_NAME}:${GRADIO_SERVER_PORT}"' \
+    'exec python tools/run_webui.py --api-url "${API_URL}"' \
+    > /app/start_webui.sh && chmod +x /app/start_webui.sh
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:${GRADIO_SERVER_PORT}/ || exit 1
+
+ENTRYPOINT ["/app/start_webui.sh"]
