@@ -1,5 +1,6 @@
 import io
 import re
+import shutil
 from hashlib import sha256
 from pathlib import Path
 from typing import Callable, Literal, Tuple
@@ -180,26 +181,28 @@ class ReferenceLoader:
 
         valid_ids = []
         for ref_dir in ref_base_path.iterdir():
-            if not ref_dir.is_dir():
+            try:
+                if not ref_dir.is_dir():
+                    continue
+
+                # Check if directory contains at least one audio file and corresponding .lab file
+                audio_files = list_files(
+                    ref_dir, AUDIO_EXTENSIONS, recursive=False, sort=False
+                )
+                if not audio_files:
+                    continue
+
+                # Check if corresponding .lab file exists for at least one audio file
+                has_valid_pair = any(
+                    audio_file.with_suffix(".lab").exists()
+                    for audio_file in audio_files
+                )
+
+                if has_valid_pair:
+                    valid_ids.append(ref_dir.name)
+            except (OSError, FileNotFoundError):
+                # Directory may have been deleted by a concurrent request
                 continue
-
-            # Check if directory contains at least one audio file and corresponding .lab file
-            audio_files = list_files(
-                ref_dir, AUDIO_EXTENSIONS, recursive=False, sort=False
-            )
-            if not audio_files:
-                continue
-
-            # Check if corresponding .lab file exists for at least one audio file
-            has_valid_pair = False
-            for audio_file in audio_files:
-                lab_file = audio_file.with_suffix(".lab")
-                if lab_file.exists():
-                    has_valid_pair = True
-                    break
-
-            if has_valid_pair:
-                valid_ids.append(ref_dir.name)
 
         return sorted(valid_ids)
 
@@ -243,8 +246,6 @@ class ReferenceLoader:
             target_audio_path = ref_dir / f"sample{audio_path.suffix}"
 
             # Copy audio file
-            import shutil
-
             shutil.copy2(audio_path, target_audio_path)
 
             # Create .lab file
@@ -285,8 +286,6 @@ class ReferenceLoader:
 
         try:
             # Remove the entire reference directory
-            import shutil
-
             shutil.rmtree(ref_dir)
 
             # Clear cache for this ID if it exists

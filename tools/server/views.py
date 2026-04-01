@@ -453,12 +453,16 @@ async def update_reference(
             )
             return format_response(response, status_code=409)
 
+        # Invalidate old cache entry before rename so concurrent reads
+        # fail fast rather than finding a stale cache + missing directory.
+        cached_entry = engine.ref_by_id.pop(old_reference_id, None)
+
         # Perform rename
         old_dir.rename(new_dir)
 
-        # Update in-memory cache key if present
-        if old_reference_id in engine.ref_by_id:
-            engine.ref_by_id[new_reference_id] = engine.ref_by_id.pop(old_reference_id)
+        # Re-insert under new key
+        if cached_entry is not None:
+            engine.ref_by_id[new_reference_id] = cached_entry
 
         response = UpdateReferenceResponse(
             success=True,
@@ -485,8 +489,8 @@ async def update_reference(
         response = UpdateReferenceResponse(
             success=False,
             message=str(e),
-            old_reference_id=old_reference_id if "old_reference_id" in locals() else "",
-            new_reference_id=new_reference_id if "new_reference_id" in locals() else "",
+            old_reference_id=old_reference_id,
+            new_reference_id=new_reference_id,
         )
         return format_response(response, status_code=400)
 
@@ -505,7 +509,7 @@ async def update_reference(
         response = UpdateReferenceResponse(
             success=False,
             message="Internal server error occurred",
-            old_reference_id=old_reference_id if "old_reference_id" in locals() else "",
-            new_reference_id=new_reference_id if "new_reference_id" in locals() else "",
+            old_reference_id=old_reference_id,
+            new_reference_id=new_reference_id,
         )
         return format_response(response, status_code=500)
