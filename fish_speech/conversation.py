@@ -107,7 +107,6 @@ class Conversation:
         tokenizer: PreTrainedTokenizerFast,
         ignore_loss_tokens: list[str] = [],
         merge_semantic_tokens: bool = False,
-        merge_audio_tokens: bool = False,
         use_color: bool = True,
     ):
         """

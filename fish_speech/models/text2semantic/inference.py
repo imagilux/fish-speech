@@ -697,7 +697,6 @@ def generate_long(
             logger.info("Visualizing prompt structure:")
             conversation_gen.visualize(
                 tokenizer,
-                merge_audio_tokens=True,
                 merge_semantic_tokens=True,
             )
 
