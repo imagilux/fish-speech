@@ -50,6 +50,8 @@ from tools.server.model_utils import (
 )
 
 MAX_NUM_SAMPLES = int(os.getenv("NUM_SAMPLES", 1))
+MAX_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE", 16))
+MAX_TEXT_LENGTH_HARD = int(os.getenv("MAX_TEXT_LENGTH_HARD", 50000))
 
 _WEBUI_HTML = (
     Path(__file__).parent.parent.parent / "awesome_webui" / "dist" / "index.html"
@@ -89,6 +91,12 @@ async def vqgan_encode(req: Annotated[ServeVQGANEncodeRequest, Body(exclusive=Tr
     Encode audio using VQGAN model.
     """
     try:
+        if len(req.audios) > MAX_BATCH_SIZE:
+            raise HTTPException(
+                HTTPStatus.BAD_REQUEST,
+                content=f"Batch size {len(req.audios)} exceeds limit of {MAX_BATCH_SIZE}",
+            )
+
         # Get the model from the app
         model_manager: ModelManager = request.app.state.model_manager
         decoder_model = model_manager.decoder_model
@@ -118,12 +126,21 @@ async def vqgan_decode(req: Annotated[ServeVQGANDecodeRequest, Body(exclusive=Tr
     Decode tokens to audio using VQGAN model.
     """
     try:
+        if len(req.tokens) > MAX_BATCH_SIZE:
+            raise HTTPException(
+                HTTPStatus.BAD_REQUEST,
+                content=f"Batch size {len(req.tokens)} exceeds limit of {MAX_BATCH_SIZE}",
+            )
+
         # Get the model from the app
         model_manager: ModelManager = request.app.state.model_manager
         decoder_model = model_manager.decoder_model
 
         # Decode the audio
-        tokens = [torch.tensor(token, dtype=torch.int) for token in req.tokens]
+        tokens = [
+            torch.tensor(token, dtype=torch.int, device=decoder_model.device)
+            for token in req.tokens
+        ]
         start_time = time.time()
         audios = batch_vqgan_decode(decoder_model, tokens)
         logger.info(
@@ -156,10 +173,15 @@ async def tts(req: Annotated[ServeTTSRequest, Body(exclusive=True)]):
         sample_rate = engine.decoder_model.sample_rate
 
         # Check if the text is too long
-        if app_state.max_text_length > 0 and len(req.text) > app_state.max_text_length:
+        effective_limit = (
+            app_state.max_text_length
+            if app_state.max_text_length > 0
+            else MAX_TEXT_LENGTH_HARD
+        )
+        if len(req.text) > effective_limit:
             raise HTTPException(
                 HTTPStatus.BAD_REQUEST,
-                content=f"Text is too long, max length is {app_state.max_text_length}",
+                content=f"Text is too long, max length is {effective_limit}",
             )
 
         # Check if streaming is enabled
