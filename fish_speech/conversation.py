@@ -1,6 +1,6 @@
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Optional
 
 import torch
 from transformers import PreTrainedTokenizerFast
@@ -13,7 +13,7 @@ from fish_speech.content_sequence import (
     TextPart,
     VQPart,
 )
-from fish_speech.tokenizer import IM_END_TOKEN, IM_START_TOKEN, MODALITY_TOKENS
+from fish_speech.tokenizer import IM_END_TOKEN, IM_START_TOKEN, MODALITY_TOKENS, FishTokenizer
 
 
 @dataclass(kw_only=True)
@@ -78,11 +78,11 @@ class Conversation:
 
     def encode(
         self: "Conversation",
-        tokenizer: any,
+        tokenizer: FishTokenizer,
         add_shift: bool = True,
         ignore_loss_tokens: list[str] = [],
-        metadata: dict | None = None,
-        max_length: int | None = None,
+        metadata: Optional[dict] = None,
+        max_length: Optional[int] = None,
     ) -> EncodedMessage:
         # Build ContentSequence from messages
         content_seq = self._build_content_sequence(metadata=metadata)
@@ -95,10 +95,10 @@ class Conversation:
 
     def encode_for_inference(
         self: "Conversation",
-        tokenizer: any,
+        tokenizer: FishTokenizer,
         num_codebooks: int,
-        metadata: dict | None = None,
-    ):
+        metadata: Optional[dict] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         content_seq = self._build_content_sequence(metadata=metadata)
         return content_seq.encode_for_inference(tokenizer, num_codebooks=num_codebooks)
 

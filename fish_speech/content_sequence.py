@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Literal, Union
+from typing import List, Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -156,6 +156,7 @@ class ContentSequence:
         tokenizer: FishTokenizer,
         add_shift: bool = True,
         ignore_loss_tokens: list[str] = [],
+        max_length: Optional[int] = None,
     ) -> EncodedMessage:
         """
         Encode the sequence parts into tokens for the model.
@@ -261,6 +262,15 @@ class ContentSequence:
             vq_mask_tokens = vq_mask_tokens[:-1]
             vq_mask_labels = vq_mask_labels[1:]
             audio_masks = audio_masks[:-1]
+
+        # Truncate to max_length if specified
+        if max_length is not None and len(tokens) > max_length:
+            tokens = tokens[:max_length]
+            labels = labels[:max_length]
+            vq_masks = vq_masks[:max_length]
+            vq_mask_tokens = vq_mask_tokens[:max_length]
+            vq_mask_labels = vq_mask_labels[:max_length]
+            audio_masks = audio_masks[:max_length]
 
         # Ignore specified tokens
         for i in ignore_loss_token_ids:
