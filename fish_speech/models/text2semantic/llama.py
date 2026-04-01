@@ -305,7 +305,11 @@ class BaseTransformer(nn.Module):
             self.apply(self._init_weights)
 
     def setup_caches(
-        self, max_batch_size: int, max_seq_len: int, dtype: torch.dtype = torch.bfloat16
+        self,
+        max_batch_size: int,
+        max_seq_len: int,
+        dtype: torch.dtype = torch.bfloat16,
+        kv_cache_bits: int = 16,
     ):
         if self.max_seq_len >= max_seq_len and self.max_batch_size >= max_batch_size:
             return
@@ -314,8 +318,14 @@ class BaseTransformer(nn.Module):
         self.max_seq_len = max_seq_len
         self.max_batch_size = max_batch_size
 
+        if kv_cache_bits < 16:
+            from fish_speech.models.text2semantic.turboquant import TurboQuantKVCache
+            CacheClass = lambda *a, **kw: TurboQuantKVCache(*a, bits=kv_cache_bits, **kw)
+        else:
+            CacheClass = KVCache
+
         for b in self.layers:
-            b.attention.kv_cache = KVCache(
+            b.attention.kv_cache = CacheClass(
                 max_batch_size,
                 max_seq_len,
                 self.config.n_local_heads,
@@ -743,12 +753,16 @@ class DualARTransformer(BaseTransformer):
         self.apply(self._init_weights)
 
     def setup_caches(
-        self, max_batch_size: int, max_seq_len: int, dtype: torch.dtype = torch.bfloat16
+        self,
+        max_batch_size: int,
+        max_seq_len: int,
+        dtype: torch.dtype = torch.bfloat16,
+        kv_cache_bits: int = 16,
     ):
-        super().setup_caches(max_batch_size, max_seq_len, dtype)
+        # Quantize slow AR cache (big), keep fast AR cache in bf16 (tiny)
+        super().setup_caches(max_batch_size, max_seq_len, dtype, kv_cache_bits)
 
-        # Fast transformer
-        # The max seq len here is the number of codebooks
+        # Fast transformer — only 10 positions, not worth quantizing
         for b in self.fast_layers:
             b.attention.kv_cache = KVCache(
                 max_batch_size,

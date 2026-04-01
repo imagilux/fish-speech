@@ -289,11 +289,13 @@ def generate(
     # Critical fix: Only set up cache on first run or when necessary
     if not hasattr(model, "_cache_setup_done") or not model._cache_setup_done:
         max_seq_len = int(os.environ.get("MAX_SEQ_LEN", model.config.max_seq_len))
+        kv_cache_bits = int(os.environ.get("KV_CACHE_BITS", "16"))
         with torch.device(device):
             model.setup_caches(
                 max_batch_size=1,  # Fixed to 1, avoid dynamic changes
                 max_seq_len=max_seq_len,
                 dtype=next(model.parameters()).dtype,
+                kv_cache_bits=kv_cache_bits,
             )
         model._cache_setup_done = True
 
