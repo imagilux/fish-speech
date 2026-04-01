@@ -7,16 +7,10 @@ from tools.webui.inference import list_references
 from tools.webui.variables import HEADER_MD, TEXTBOX_PLACEHOLDER
 
 
-_VALID_THEMES = {"light", "dark"}
-
 _NONE_LABEL = "None"  # visible placeholder in dropdown
 
 
-def build_app(
-    inference_fct: Callable, theme: str = "light", api_url: str = ""
-) -> gr.Blocks:
-    if theme not in _VALID_THEMES:
-        theme = "light"
+def build_app(inference_fct: Callable, api_url: str = "") -> gr.Blocks:
 
     def refresh_references(current: str = _NONE_LABEL) -> gr.update:
         ids = list_references(api_url)
@@ -25,15 +19,8 @@ def build_app(
         value = current if current in choices else _NONE_LABEL
         return gr.update(choices=choices, value=value)
 
-    with gr.Blocks(theme=gr.themes.Base()) as app:
+    with gr.Blocks() as app:
         gr.Markdown(HEADER_MD)
-
-        # Use light theme by default
-        app.load(
-            None,
-            None,
-            js=f"() => {{const params = new URLSearchParams(window.location.search);if (!params.has('__theme')) {{params.set('__theme', '{theme}');window.location.search = params.toString();}}}}"
-        )
 
         # Inference
         with gr.Row():

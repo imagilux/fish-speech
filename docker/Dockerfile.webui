@@ -35,7 +35,7 @@ COPY --from=uv-bin /uv /bin/uv
 WORKDIR /app
 
 RUN uv pip install --system --no-cache \
-    "gradio>5.0" httpx soundfile numpy loguru pyrootutils
+    "gradio>=6.0" httpx soundfile numpy loguru pyrootutils
 
 # Copy only the webui source and i18n translations
 COPY fish_speech/i18n/ fish_speech/i18n/
