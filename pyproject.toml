@@ -50,23 +50,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-stable = [
-    "torch>=2.8.0",
-    "torchaudio",
-]
 cpu = [
-  "torch==2.8.0",
-  "torchaudio==2.8.0",
-]
-cu126 = [
-  "torch==2.8.0",
-  "torchaudio==2.8.0",
-]
-cu128 = [
-  "torch==2.8.0",
-  "torchaudio==2.8.0",
-]
-cu129 = [
   "torch==2.8.0",
   "torchaudio==2.8.0",
 ]
@@ -85,9 +69,6 @@ override-dependencies = [
 conflicts = [
   [
     { extra = "cpu" },
-    { extra = "cu126" },
-    { extra = "cu128" },
-    { extra = "cu129" },
     { extra = "rocm72" },
   ],
 ]
@@ -95,16 +76,10 @@ conflicts = [
 [tool.uv.sources]
 torch = [
   { index = "pytorch-cpu", extra = "cpu" },
-  { index = "pytorch-cu126", extra = "cu126" },
-  { index = "pytorch-cu128", extra = "cu128" },
-  { index = "pytorch-cu129", extra = "cu129" },
   { index = "pytorch-rocm72", extra = "rocm72" },
 ]
 torchaudio = [
   { index = "pytorch-cpu", extra = "cpu" },
-  { index = "pytorch-cu126", extra = "cu126" },
-  { index = "pytorch-cu128", extra = "cu128" },
-  { index = "pytorch-cu129", extra = "cu129" },
   { index = "pytorch-rocm72", extra = "rocm72" },
 ]
 triton-rocm = [
@@ -114,21 +89,6 @@ triton-rocm = [
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cu126"
-url = "https://download.pytorch.org/whl/cu126"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cu129"
-url = "https://download.pytorch.org/whl/cu129"
 explicit = true
 
 [[tool.uv.index]]
