@@ -133,13 +133,16 @@ class ReferenceLoader:
 
     def load_audio(self, reference_audio: bytes | str, sr: int) -> np.ndarray:
         """
-        Load the audio data from a file path or raw bytes.
+        Load audio from raw bytes or a file path.
+
+        Args:
+            reference_audio: Raw audio bytes or path to an audio file.
+            sr: Target sample rate.
         """
         if isinstance(reference_audio, bytes):
             reference_audio = io.BytesIO(reference_audio)
         elif not Path(reference_audio).exists():
-            # Treat as raw audio data in a string-like container
-            reference_audio = io.BytesIO(reference_audio)  # type: ignore[arg-type]
+            raise FileNotFoundError(f"Reference audio file not found: {reference_audio}")
 
         if self._use_soundfile_directly:
             import soundfile
