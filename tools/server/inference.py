@@ -6,7 +6,7 @@ from kui.asgi import HTTPException
 from fish_speech.inference_engine import TTSInferenceEngine
 from fish_speech.utils.schema import ServeTTSRequest
 
-AMPLITUDE = 32768  # Needs an explaination
+AMPLITUDE = 32767  # int16 max (2^15 - 1) for float→int16 PCM scaling
 
 
 def inference_wrapper(req: ServeTTSRequest, engine: TTSInferenceEngine):

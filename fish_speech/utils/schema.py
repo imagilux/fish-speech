@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
-from pydantic import BaseModel, Field, conint, model_validator
+from pydantic import BaseModel, ConfigDict, Field, conint, model_validator
 from pydantic.functional_validators import SkipValidation
 from typing_extensions import Annotated
 
@@ -102,9 +102,7 @@ class ServeTTSRequest(BaseModel):
     repetition_penalty: Annotated[float, Field(ge=0.9, le=2.0, strict=True)] = 1.1
     temperature: Annotated[float, Field(ge=0.1, le=1.0, strict=True)] = 0.8
 
-    class Config:
-        # Allow arbitrary types for pytorch related types
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class AddReferenceRequest(BaseModel):
