@@ -1,4 +1,3 @@
-import gc
 import queue
 from typing import Generator
 
@@ -97,7 +96,15 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
         is_streaming_chunks = req.streaming and self.subprocess_active
 
         while True:
-            wrapped_result: WrappedGenerateResponse = response_queue.get()
+            try:
+                wrapped_result: WrappedGenerateResponse = response_queue.get(timeout=300)
+            except queue.Empty:
+                yield InferenceResult(
+                    code="error",
+                    audio=None,
+                    error=RuntimeError("LLM inference timed out (300s)"),
+                )
+                break
             if wrapped_result.status == "error":
                 yield InferenceResult(
                     code="error",
@@ -160,10 +167,9 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
             elif result.action == "next":
                 break
 
-        # Clean up
+        # Clean up GPU memory
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            gc.collect()
 
         # Edge case: no audio generated
         if len(segments) == 0:
@@ -180,8 +186,6 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
                 audio=(sample_rate, audio),
                 error=None,
             )
-
-        return None
 
     def _decode_streaming_chunk(self, all_codes, tokens_decoded, sample_rate):
         """Decode a streaming chunk with left context, return only new audio."""
@@ -204,7 +208,7 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
         # Trim context audio — only keep the new tokens' audio
         context_tokens = new_start - context_start
         trim_samples = context_tokens * self._frame_length
-        if trim_samples > 0 and trim_samples < len(audio):
+        if trim_samples > 0 and trim_samples <= len(audio):
             audio = audio[trim_samples:]
 
         return audio
