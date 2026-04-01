@@ -245,9 +245,15 @@ class VQManager:
             self.shutdown_decoder_subprocess()
             # Move parent DAC back to GPU for in-process decode
             target_device = codes.device
-            if self.decoder_model.device != target_device:
-                logger.warning(f"Moving DAC model to {target_device} for fallback decode")
-                self.decoder_model.to(target_device)
+            try:
+                if self.decoder_model.device != target_device:
+                    logger.warning(f"Moving DAC model to {target_device} for fallback decode")
+                    self.decoder_model.to(target_device)
+            except RuntimeError as e:
+                raise RuntimeError(
+                    f"Decoder subprocess died and fallback model move to "
+                    f"{target_device} failed: {e}"
+                ) from e
             return self.decode_vq_tokens(codes)
 
         t0 = time.perf_counter()
@@ -273,9 +279,12 @@ class VQManager:
             logger.error("Decoder subprocess died, falling back to in-process encode")
             self.shutdown_decoder_subprocess()
             # Move parent DAC back to GPU for in-process encode fallback
-            if torch.cuda.is_available() and self.decoder_model.device.type == "cpu":
-                logger.warning("Moving DAC model to cuda for fallback encode")
-                self.decoder_model.to("cuda")
+            try:
+                if torch.cuda.is_available() and self.decoder_model.device.type == "cpu":
+                    logger.warning("Moving DAC model to cuda for fallback encode")
+                    self.decoder_model.to("cuda")
+            except RuntimeError as e:
+                logger.error(f"Failed to move DAC model to GPU for encode fallback: {e}")
             return None  # caller will fall through to in-process path
 
         t0 = time.perf_counter()
