@@ -6,14 +6,19 @@ Based on:
 
 Core idea:
   1. Apply a random orthogonal rotation to each KV vector — makes coordinates
-     approximately independent Gaussian, enabling per-coordinate quantization
-     without joint codebook overhead.
-  2. Store the vector magnitude (L2 norm) in fp16.
-  3. Quantize each rotated coordinate to N bits using precomputed Lloyd-Max
-     centroids for the standard Gaussian distribution.
-  4. On read: dequantize centroids, apply inverse rotation, scale by magnitude.
+     approximately independent Gaussian, enabling per-coordinate quantization.
+  2. Store the vector magnitude (fp16) and mean (fp16).
+  3. Quantize each rotated coordinate to N bits using Lloyd-Max Gaussian centroids.
+  4. Pack indices into uint8 (2 or 4 values per byte).
 
-This gives ~4x compression at 4-bit and ~6x at 2-bit with minimal accuracy loss.
+The cache stores ONLY the compressed representation. On read (every attention
+step), we dequantize on the fly. This trades compute for memory — the
+dequantization is cheap (table lookup + matmul) vs the memory saved.
+
+Memory per layer (B=1, H=8, D=128):
+  bf16 KVCache @ 4096 seq:  8 * 4096 * 128 * 2 = 8 MB per K or V
+  4-bit TurboQuant:         8 * 4096 * (64 + 2 + 2) = 2.1 MB per K or V  (~3.8x)
+  2-bit TurboQuant:         8 * 4096 * (32 + 2 + 2) = 1.1 MB per K or V  (~7x)
 """
 
 import math
@@ -25,13 +30,7 @@ from loguru import logger
 
 
 def _gaussian_lloyd_max_centroids(bits: int) -> torch.Tensor:
-    """Precomputed Lloyd-Max optimal centroids for N(0,1) distribution.
-
-    These are the optimal reconstruction points that minimize MSE for
-    scalar quantization of a standard normal distribution. Values from
-    the Lloyd-Max algorithm (iterative k-means on the continuous PDF).
-    """
-    # Precomputed centroids for common bit widths (symmetric around 0)
+    """Precomputed Lloyd-Max optimal centroids for N(0,1) distribution."""
     tables = {
         2: torch.tensor([-1.5104, -0.4528, 0.4528, 1.5104]),
         3: torch.tensor([
@@ -53,9 +52,7 @@ def _gaussian_lloyd_max_centroids(bits: int) -> torch.Tensor:
 def _gaussian_lloyd_max_boundaries(bits: int) -> torch.Tensor:
     """Decision boundaries (midpoints between adjacent centroids)."""
     centroids = _gaussian_lloyd_max_centroids(bits)
-    # Boundaries are midpoints between adjacent centroids, plus -inf/+inf
-    mids = (centroids[:-1] + centroids[1:]) / 2
-    return mids
+    return (centroids[:-1] + centroids[1:]) / 2
 
 
 def _pack_indices(indices: torch.Tensor, bits: int) -> torch.Tensor:
@@ -64,59 +61,39 @@ def _pack_indices(indices: torch.Tensor, bits: int) -> torch.Tensor:
     Args:
         indices: (*, D) tensor of values in [0, 2^bits - 1]
         bits: 2 or 4
-
-    Returns:
-        Packed uint8 tensor of shape (*, D // vals_per_byte)
     """
     vals_per_byte = 8 // bits
     *prefix, D = indices.shape
-    packed_D = (D + vals_per_byte - 1) // vals_per_byte
 
     indices = indices.to(torch.uint8)
-    # Pad D to multiple of vals_per_byte
     if D % vals_per_byte != 0:
         pad = vals_per_byte - (D % vals_per_byte)
         indices = torch.nn.functional.pad(indices, (0, pad))
 
     indices = indices.view(*prefix, -1, vals_per_byte)
-
     packed = torch.zeros(*prefix, indices.shape[-2], dtype=torch.uint8, device=indices.device)
     for i in range(vals_per_byte):
         packed |= indices[..., i] << (i * bits)
-
     return packed
 
 
 def _unpack_indices(packed: torch.Tensor, bits: int, dim: int) -> torch.Tensor:
-    """Unpack uint8 tensor back to quantization indices.
-
-    Args:
-        packed: (*, packed_D) uint8 tensor
-        bits: 2 or 4
-        dim: original unpacked dimension D
-
-    Returns:
-        (*, D) tensor of values in [0, 2^bits - 1]
-    """
+    """Unpack uint8 tensor back to quantization indices."""
     vals_per_byte = 8 // bits
     mask = (1 << bits) - 1
-
     *prefix, packed_D = packed.shape
+
     unpacked = torch.zeros(*prefix, packed_D, vals_per_byte, dtype=torch.uint8, device=packed.device)
     for i in range(vals_per_byte):
         unpacked[..., i] = (packed >> (i * bits)) & mask
-
-    unpacked = unpacked.view(*prefix, -1)
-    return unpacked[..., :dim]
+    return unpacked.view(*prefix, -1)[..., :dim]
 
 
 class TurboQuantKVCache(nn.Module):
     """Drop-in replacement for KVCache with PolarQuant-style compression.
 
-    Memory comparison for (B=1, H=8, S=4096, D=128):
-      bf16 KVCache:      1 * 8 * 4096 * 128 * 2 = 8 MB per K or V
-      4-bit TurboQuant:  1 * 8 * 4096 * (64 + 2) = 0.52 MB per K or V  (~4x)
-      2-bit TurboQuant:  1 * 8 * 4096 * (32 + 2) = 0.27 MB per K or V  (~7.5x)
+    Stores only compressed data (packed indices + magnitude + mean).
+    Dequantizes on every read — trades compute for VRAM savings.
     """
 
     def __init__(
@@ -135,128 +112,99 @@ class TurboQuantKVCache(nn.Module):
         self.max_seq_len = max_seq_len
         self.dtype = dtype
 
-        n_levels = 1 << bits  # 2^bits
-
-        # Random orthogonal rotation matrix — makes coordinates independent
+        # Random orthogonal rotation matrix
         R = torch.randn(head_dim, head_dim, dtype=torch.float32)
         R, _ = torch.linalg.qr(R)
         self.register_buffer("rotation", R.to(dtype))
 
-        # Lloyd-Max centroids and boundaries for Gaussian quantization
+        # Lloyd-Max centroids and boundaries
         centroids = _gaussian_lloyd_max_centroids(bits)
         boundaries = _gaussian_lloyd_max_boundaries(bits)
         self.register_buffer("centroids", centroids.to(dtype))
         self.register_buffer("boundaries", boundaries.to(dtype))
 
-        # Packed quantized cache
+        # Compressed storage — ONLY these tensors live on GPU
         vals_per_byte = 8 // bits
         packed_dim = (head_dim + vals_per_byte - 1) // vals_per_byte
         cache_shape = (max_batch_size, n_heads, max_seq_len, packed_dim)
         self.register_buffer("k_packed", torch.zeros(cache_shape, dtype=torch.uint8))
         self.register_buffer("v_packed", torch.zeros(cache_shape, dtype=torch.uint8))
 
-        # Per-vector magnitude (L2 norm) and mean, stored in full precision
         norm_shape = (max_batch_size, n_heads, max_seq_len, 1)
         self.register_buffer("k_mag", torch.zeros(norm_shape, dtype=dtype))
         self.register_buffer("v_mag", torch.zeros(norm_shape, dtype=dtype))
         self.register_buffer("k_mean", torch.zeros(norm_shape, dtype=dtype))
         self.register_buffer("v_mean", torch.zeros(norm_shape, dtype=dtype))
 
+        # High-water mark — only dequantize filled positions
+        self._seq_high_water: int = 0
+
+        compression = self._compression_ratio()
         logger.info(
             f"TurboQuantKVCache: {bits}-bit, {head_dim}D, "
-            f"~{self._compression_ratio():.1f}x compression"
+            f"~{compression:.1f}x compression"
         )
 
     def _compression_ratio(self) -> float:
-        bf16_bytes = self.head_dim * 2  # bf16 = 2 bytes per element
+        bf16_bytes = self.head_dim * 2
         quant_bytes = (self.head_dim * self.bits / 8) + 2 + 2  # packed + mag + mean
         return bf16_bytes / quant_bytes
 
-    def _quantize_vector(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Quantize vectors using random rotation + scalar Lloyd-Max.
-
-        Args:
-            x: (B, H, S, D) input vectors
-
-        Returns:
-            packed: (B, H, S, packed_D) uint8 packed indices
-            mag: (B, H, S, 1) L2 norms
-            mean: (B, H, S, 1) per-vector means
-        """
-        B, H, S, D = x.shape
-
-        # Store mean and magnitude for reconstruction
+    def _quantize(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Quantize vectors: rotate → normalize → quantize → pack."""
         mean = x.mean(dim=-1, keepdim=True)
         x_centered = x - mean
         mag = torch.norm(x_centered, dim=-1, keepdim=True).clamp(min=1e-8)
-
-        # Normalize to unit variance per coordinate: x_norm ~ N(0, 1/sqrt(D))
-        x_norm = x_centered / mag * math.sqrt(D)
-
-        # Apply random rotation — makes coordinates approximately iid N(0, 1/sqrt(D))
-        # After rotation and scaling, each coordinate ~ N(0, 1) approximately
-        x_rot = x_norm @ self.rotation  # (B, H, S, D)
-
-        # Scalar quantization using Lloyd-Max boundaries
-        # boundaries shape: (n_levels - 1,)
-        # Result: indices in [0, n_levels - 1]
-        indices = torch.bucketize(x_rot, self.boundaries)  # (B, H, S, D)
-
-        # Pack into uint8
+        x_norm = x_centered / mag * math.sqrt(self.head_dim)
+        x_rot = x_norm @ self.rotation
+        indices = torch.bucketize(x_rot, self.boundaries)
         packed = _pack_indices(indices, self.bits)
-
         return packed, mag, mean
 
-    def _dequantize_vector(
+    def _dequantize(
         self, packed: torch.Tensor, mag: torch.Tensor, mean: torch.Tensor
     ) -> torch.Tensor:
-        """Dequantize vectors from packed indices + magnitude + mean.
-
-        Args:
-            packed: (B, H, S, packed_D) uint8
-            mag: (B, H, S, 1)
-            mean: (B, H, S, 1)
-
-        Returns:
-            x_approx: (B, H, S, D) reconstructed vectors in original dtype
-        """
-        # Unpack indices
+        """Dequantize vectors: unpack → lookup → inverse rotate → rescale."""
         indices = _unpack_indices(packed, self.bits, self.head_dim)
-
-        # Look up centroids
-        x_rot = self.centroids[indices.long()]  # (B, H, S, D)
-
-        # Inverse rotation
+        x_rot = self.centroids[indices.long()]
         x_norm = x_rot @ self.rotation.T
-
-        # Rescale by magnitude and add mean
-        x_approx = x_norm * mag / math.sqrt(self.head_dim) + mean
-
-        return x_approx
+        return x_norm * mag / math.sqrt(self.head_dim) + mean
 
     def update(
         self, input_pos: torch.Tensor, k_val: torch.Tensor, v_val: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Quantize and store new K/V, return dequantized full cache.
+        """Quantize new K/V, store compressed, return full dequantized cache.
 
-        Drop-in compatible with KVCache.update().
+        Only dequantizes positions 0..high_water_mark (not the full max_seq_len).
+        The returned tensors are temporary — they're consumed by attention and freed.
         """
         assert input_pos.shape[0] == k_val.shape[2]
 
-        # Quantize incoming K and V
-        k_packed, k_mag, k_mean = self._quantize_vector(k_val)
-        v_packed, v_mag, v_mean = self._quantize_vector(v_val)
+        # Quantize and store
+        k_p, k_m, k_mu = self._quantize(k_val)
+        v_p, v_m, v_mu = self._quantize(v_val)
 
-        # Store compressed form
-        self.k_packed[:, :, input_pos] = k_packed
-        self.v_packed[:, :, input_pos] = v_packed
-        self.k_mag[:, :, input_pos] = k_mag
-        self.v_mag[:, :, input_pos] = v_mag
-        self.k_mean[:, :, input_pos] = k_mean
-        self.v_mean[:, :, input_pos] = v_mean
+        self.k_packed[:, :, input_pos] = k_p
+        self.v_packed[:, :, input_pos] = v_p
+        self.k_mag[:, :, input_pos] = k_m
+        self.v_mag[:, :, input_pos] = v_m
+        self.k_mean[:, :, input_pos] = k_mu
+        self.v_mean[:, :, input_pos] = v_mu
 
-        # Dequantize full cache for attention
-        k_out = self._dequantize_vector(self.k_packed, self.k_mag, self.k_mean)
-        v_out = self._dequantize_vector(self.v_packed, self.v_mag, self.v_mean)
+        # Update high-water mark
+        hw = int(input_pos.max().item()) + 1
+        self._seq_high_water = max(self._seq_high_water, hw)
+        S = self._seq_high_water
 
-        return k_out, v_out
+        # Dequantize only filled positions — much smaller than max_seq_len
+        k_deq = self._dequantize(self.k_packed[:, :, :S], self.k_mag[:, :, :S], self.k_mean[:, :, :S])
+        v_deq = self._dequantize(self.v_packed[:, :, :S], self.v_mag[:, :, :S], self.v_mean[:, :, :S])
+
+        # Pad to max_seq_len (attention mask handles the rest)
+        B, H = k_val.shape[:2]
+        if S < self.max_seq_len:
+            pad = self.max_seq_len - S
+            k_deq = torch.nn.functional.pad(k_deq, (0, 0, 0, pad))
+            v_deq = torch.nn.functional.pad(v_deq, (0, 0, 0, pad))
+
+        return k_deq, v_deq
