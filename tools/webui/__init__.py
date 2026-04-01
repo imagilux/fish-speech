@@ -3,7 +3,7 @@ from typing import Callable
 import gradio as gr
 
 from fish_speech.i18n import i18n
-from tools.webui.inference import list_references
+from tools.webui.inference import list_references, save_reference
 from tools.webui.variables import HEADER_MD, TEXTBOX_PLACEHOLDER
 
 
@@ -84,18 +84,12 @@ def build_app(inference_fct: Callable, api_url: str = "") -> gr.Blocks:
 
                         with gr.Tab(label=i18n("Reference Audio")):
                             with gr.Row():
-                                gr.Markdown(
-                                    i18n(
-                                        "5 to 10 seconds of reference audio, useful for specifying speaker."
-                                    )
-                                )
-                            with gr.Row():
                                 reference_id = gr.Dropdown(
                                     label=i18n("Reference Voice"),
                                     choices=[_NONE_LABEL],
                                     value=_NONE_LABEL,
                                     allow_custom_value=True,
-                                    info="Select a pre-loaded voice or type a custom ID",
+                                    info="Select a saved voice or type a custom ID",
                                 )
                                 refresh_btn = gr.Button(
                                     value="Refresh",
@@ -119,8 +113,26 @@ def build_app(inference_fct: Callable, api_url: str = "") -> gr.Blocks:
                                 reference_text = gr.Textbox(
                                     label=i18n("Reference Text"),
                                     lines=1,
-                                    placeholder="在一无所知中，梦里的一天结束了，一个新的「轮回」便会开始。",
+                                    placeholder="Transcription of the reference audio",
                                     value="",
+                                )
+
+                            with gr.Accordion("Save as new voice", open=False):
+                                with gr.Row():
+                                    save_name = gr.Textbox(
+                                        label="Voice Name",
+                                        placeholder="e.g. my-voice",
+                                        lines=1,
+                                        scale=3,
+                                    )
+                                    save_btn = gr.Button(
+                                        value="Save",
+                                        variant="secondary",
+                                        scale=0,
+                                        min_width=80,
+                                    )
+                                gr.Markdown(
+                                    "*Upload reference audio and enter its transcription above, then name and save it here.*"
                                 )
 
             with gr.Column(scale=3):
@@ -133,6 +145,17 @@ def build_app(inference_fct: Callable, api_url: str = "") -> gr.Blocks:
                     value="\U0001f3a7 " + i18n("Generate"),
                     variant="primary",
                 )
+
+        # Save new voice, then auto-refresh dropdown with the new voice selected
+        def do_save(name: str, audio_path: str, ref_text: str) -> gr.update:
+            save_reference(name, audio_path, ref_text, api_url)
+            return refresh_references(current=name.strip())
+
+        save_btn.click(
+            do_save,
+            inputs=[save_name, reference_audio, reference_text],
+            outputs=[reference_id],
+        )
 
         # Refresh reference list on button click (preserves current selection)
         refresh_btn.click(
