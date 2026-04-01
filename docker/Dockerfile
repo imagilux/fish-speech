@@ -1,4 +1,4 @@
-# docker/Dockerfile — API server and dev images (GPU + PyTorch + models).
+# docker/Dockerfile — API server and dev images (ROCm GPU + PyTorch + models).
 # For the lightweight WebUI image, see docker/Dockerfile.webui.
 #
 # IMPORTANT: Images do not contain checkpoints. Mount them at runtime.
@@ -9,16 +9,14 @@
 # Build the dev image:
 #   docker build -f docker/Dockerfile --build-arg BACKEND=rocm --target dev -t fish-speech-dev:rocm .
 #
-# Run the server:
-#   docker run --gpus all -v ./checkpoints:/app/checkpoints -p 8080:8080 fish-speech-server:rocm
+# Run the server (ROCm):
+#   docker run --device /dev/kfd --device /dev/dri -v ./checkpoints:/app/checkpoints -p 8080:8080 fish-speech-server:rocm
+#
+# Run the server (CPU):
+#   docker run -v ./checkpoints:/app/checkpoints -p 8080:8080 fish-speech-server:cpu
 
-
-# Select the specific cuda version (see https://hub.docker.com/r/nvidia/cuda/)
-ARG CUDA_VER=12.9.0
-# Adapt the uv extra to fit the backend (one of [cu126, cu128, cu129, rocm72, cpu])
-ARG UV_EXTRA=cu129
-ARG BACKEND=cuda
-# ROCm version (see https://hub.docker.com/r/rocm/dev-ubuntu-24.04)
+ARG UV_EXTRA=rocm72
+ARG BACKEND=rocm
 ARG ROCM_VER=7.2.1
 
 ARG UBUNTU_VER=24.04
@@ -33,26 +31,6 @@ ARG USER_GID=1000
 ##############################################################
 # Base stage per backend
 ##############################################################
-
-# --- CUDA (x86_64) ---
-FROM nvidia/cuda:${CUDA_VER}-cudnn-runtime-ubuntu${UBUNTU_VER} AS base-cuda
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Install system dependencies in a single layer with cleanup
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    set -eux \
-    && rm -f /etc/apt/apt.conf.d/docker-clean \
-    && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' >/etc/apt/apt.conf.d/keep-cache \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-        python3-pip \
-        python3-dev \
-        git \
-        ca-certificates \
-        curl \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
 
 # --- ROCm (AMD GPU, x86_64) ---
 FROM rocm/dev-ubuntu-${UBUNTU_VER}:${ROCM_VER} AS base-rocm

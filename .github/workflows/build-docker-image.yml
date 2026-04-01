@@ -13,9 +13,6 @@ jobs:
     strategy:
       matrix:
         include:
-          - backend: cuda
-            uv_extra: cu129
-            platforms: linux/amd64
           - backend: rocm
             uv_extra: rocm72
             platforms: linux/amd64

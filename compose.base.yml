@@ -4,10 +4,9 @@ services:
       context: .
       dockerfile: docker/Dockerfile
       args:
-        BACKEND: ${BACKEND:-cuda}     # cuda, cpu, or rocm
-        CUDA_VER: ${CUDA_VER:-12.9.0}
+        BACKEND: ${BACKEND:-rocm}       # rocm or cpu
         ROCM_VER: ${ROCM_VER:-7.2.1}
-        UV_EXTRA: ${UV_EXTRA:-cu129}  # cu126, cu128, cu129, rocm72, or cpu
+        UV_EXTRA: ${UV_EXTRA:-rocm72}   # rocm72 or cpu
         UV_VERSION: ${UV_VERSION:-0.8.15}
     volumes:
       - ./checkpoints:/app/checkpoints
