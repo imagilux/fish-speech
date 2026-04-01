@@ -65,12 +65,16 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
             set_seed(req.seed)
             logger.warning(f"set seed: {req.seed}")
 
+        # Cache subprocess_active once — it reads _decoder_conn which could
+        # change if the subprocess dies mid-request.
+        _subprocess_active = self.subprocess_active
+
         # Lazy reload: only move LLM to GPU when actually needed
         if hasattr(self.llama_queue, "offloaded") and self.llama_queue.offloaded:
             self.llama_queue.reload_to_gpu()
 
         # Get the symbolic tokens from the LLAMA model
-        response_queue = self.send_Llama_request(req, prompt_tokens, prompt_texts)
+        response_queue = self.send_Llama_request(req, prompt_tokens, prompt_texts, _subprocess_active)
 
         # Get the sample rate from the decoder model
         if hasattr(self.decoder_model, "spec_transform"):
@@ -93,7 +97,7 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
         # arrive) or batch (collect all, then decode).
         segments = []
         tokens_decoded = 0  # Track how many tokens we've yielded audio for
-        is_streaming_chunks = req.streaming and self.subprocess_active
+        is_streaming_chunks = req.streaming and _subprocess_active
 
         while True:
             try:
@@ -153,7 +157,7 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
                         )
                 else:
                     # Batch mode: offload LLM, decode full sequence
-                    if self.subprocess_active and hasattr(self.llama_queue, "offload_to_cpu"):
+                    if _subprocess_active and hasattr(self.llama_queue, "offload_to_cpu"):
                         self.llama_queue.offload_to_cpu()
                     segment = self.get_audio_segment(result)
                     segments.append(segment)
@@ -214,7 +218,11 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
         return audio
 
     def send_Llama_request(
-        self, req: ServeTTSRequest, prompt_tokens: list, prompt_texts: list
+        self,
+        req: ServeTTSRequest,
+        prompt_tokens: list,
+        prompt_texts: list,
+        subprocess_active: bool,
     ) -> queue.Queue:
         """
         Send a request to the LLAMA model to generate the symbolic tokens.
@@ -233,7 +241,7 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
             chunk_length=req.chunk_length,
             prompt_tokens=prompt_tokens,
             prompt_text=prompt_texts,
-            stream_chunk_size=STREAM_CHUNK_SIZE if req.streaming and self.subprocess_active else 0,
+            stream_chunk_size=STREAM_CHUNK_SIZE if req.streaming and subprocess_active else 0,
         )
 
         # Create a queue to get the response
