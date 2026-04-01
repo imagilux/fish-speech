@@ -8,18 +8,26 @@ on:
       - "v*"
 
 jobs:
-  build:
-    runs-on: ubuntu-latest-16c64g
+  build-server:
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [webui, server]
-        backend: [cuda, cpu]
+        include:
+          - backend: cuda
+            uv_extra: cu129
+            platforms: linux/amd64
+          - backend: rocm
+            uv_extra: rocm72
+            platforms: linux/amd64
+          - backend: cpu
+            uv_extra: cpu
+            platforms: linux/amd64,linux/arm64
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      
+
       - name: Get Version
         run: |
           if [[ $GITHUB_REF == refs/tags/v* ]]; then
@@ -28,51 +36,64 @@ jobs:
             version=nightly
           fi
           echo "version=${version}" >> $GITHUB_ENV
-          echo "Current version: ${version}"
 
-      - name: Login to Docker Hub
+      - name: Login to GHCR
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USER }}
-          password: ${{ secrets.DOCKER_PAT }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set platform for CPU builds
-        id: platform
-        run: |
-          if [ "${{ matrix.backend }}" = "cpu" ]; then
-            echo "platforms=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
-          else
-            echo "platforms=linux/amd64" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Build and Push ${{ matrix.target }}-${{ matrix.backend }} Image
+      - name: Build and Push server-${{ matrix.backend }}
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile
-          platforms: ${{ steps.platform.outputs.platforms }}
+          platforms: ${{ matrix.platforms }}
           push: true
-          target: ${{ matrix.target }}
+          target: server
           build-args: |
             BACKEND=${{ matrix.backend }}
-            UV_EXTRA=${{ matrix.backend == 'cuda' && 'cu126' || 'cpu' }}
+            UV_EXTRA=${{ matrix.uv_extra }}
           tags: |
-            fishaudio/fish-speech:${{ matrix.target }}-${{ matrix.backend }}-${{ env.version }}
-            fishaudio/fish-speech:${{ matrix.target }}-${{ matrix.backend }}
-            ${{ (matrix.target == 'webui' && matrix.backend == 'cuda') && format('fishaudio/fish-speech:{0}', env.version) || '' }}
-            ${{ (matrix.target == 'webui' && matrix.backend == 'cuda') && 'fishaudio/fish-speech:latest' || '' }}
-          outputs: type=image,oci-mediatypes=true,compression=zstd,compression-level=3,force-compression=true
-          cache-from: type=registry,ref=fishaudio/fish-speech:${{ matrix.target }}-${{ matrix.backend }}
+            ghcr.io/${{ github.repository }}:server-${{ matrix.backend }}-${{ env.version }}
+            ghcr.io/${{ github.repository }}:server-${{ matrix.backend }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:server-${{ matrix.backend }}
           cache-to: type=inline
 
-  update-readme:
+  build-webui:
     runs-on: ubuntu-latest
-    needs: build
-    if: github.ref == 'refs/heads/main'
     steps:
-      - name: Push README to Dockerhub
-        uses: peter-evans/dockerhub-description@v4
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Get Version
+        run: |
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            version=$(basename ${GITHUB_REF})
+          else
+            version=nightly
+          fi
+          echo "version=${version}" >> $GITHUB_ENV
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USER }}
-          password: ${{ secrets.DOCKER_PAT }}
-          repository: fishaudio/fish-speech
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push webui
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.webui
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:webui-${{ env.version }}
+            ghcr.io/${{ github.repository }}:webui
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:webui
+          cache-to: type=inline
