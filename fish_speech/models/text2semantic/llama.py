@@ -959,38 +959,49 @@ class Attention(nn.Module):
         q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
 
         if self.kv_cache is not None:
-            k, v = self.kv_cache.update(input_pos, k, v)
-
-        k = k.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
-        v = v.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
-
-        if self.use_sdpa:
-            if mask is None:
-                with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-                    y = F.scaled_dot_product_attention(
-                        q,
-                        k,
-                        v,
-                        dropout_p=self.dropout if self.training else 0.0,
-                        is_causal=True,
-                        # No third party attn_mask here to use flash_attention
-                    )
+            # INT4 kernel path: store compressed, attend directly
+            from fish_speech.models.text2semantic.turboquant import TurboQuantKVCache
+            if isinstance(self.kv_cache, TurboQuantKVCache):
+                self.kv_cache.store(input_pos, k, v)
+                y = self.kv_cache.attend(q, self.n_head)
             else:
+                # Standard bf16 path
+                k, v = self.kv_cache.update(input_pos, k, v)
+                k = k.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
+                v = v.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
+
+                if self.use_sdpa:
+                    if mask is None:
+                        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+                            y = F.scaled_dot_product_attention(
+                                q, k, v,
+                                dropout_p=self.dropout if self.training else 0.0,
+                                is_causal=True,
+                            )
+                    else:
+                        y = F.scaled_dot_product_attention(
+                            q, k, v, attn_mask=mask,
+                            dropout_p=self.dropout if self.training else 0.0,
+                        )
+                else:
+                    y = self.eq_scaled_dot_product_attention(
+                        q, k, v, attn_mask=mask,
+                        dropout_p=self.dropout if self.training else 0.0,
+                    )
+        else:
+            # No cache (training or first setup)
+            k = k.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
+            v = v.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
+            if self.use_sdpa:
                 y = F.scaled_dot_product_attention(
-                    q,
-                    k,
-                    v,
-                    attn_mask=mask,
+                    q, k, v, attn_mask=mask,
                     dropout_p=self.dropout if self.training else 0.0,
                 )
-        else:
-            y = self.eq_scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=mask,
-                dropout_p=self.dropout if self.training else 0.0,
-            )
+            else:
+                y = self.eq_scaled_dot_product_attention(
+                    q, k, v, attn_mask=mask,
+                    dropout_p=self.dropout if self.training else 0.0,
+                )
 
         y = y.transpose(1, 2).contiguous().view(bsz, seqlen, q_size)
 

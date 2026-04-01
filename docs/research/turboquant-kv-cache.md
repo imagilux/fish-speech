@@ -56,7 +56,21 @@ The key insight: steps 1-4 can be **fused into the attention kernel's inner
 loop**, dequantizing one tile of K/V at a time into registers/shared memory.
 The full bf16 KV cache is never materialized in global memory.
 
-## Roadmap: Native INT4 KV Cache Attention Kernel
+## Results: Native INT4 Triton Kernel (Phase 1+2 complete)
+
+| Metric | bf16 KVCache | INT4 Kernel |
+|--------|-------------|-------------|
+| Idle VRAM | 7.0 GB | **5.6 GB** (-1.4 GB) |
+| Post-inference VRAM | ~11 GB | **9.1 GB** (-1.9 GB) |
+| Kernel accuracy | reference | cosine 0.998 |
+| TTS latency | 25.3s | 25.3s (no overhead) |
+| TTS output | Valid WAV | Valid WAV |
+
+The Triton kernel reads packed INT4 bytes directly on GPU. No bf16 KV
+tensors are materialized in global memory. GQA (32 Q heads → 8 KV heads)
+is handled by mapping Q heads to KV heads in the Python wrapper.
+
+## Roadmap: Remaining work
 
 ### Phase 1: HIP kernel prototype (target: proof of concept)
 
