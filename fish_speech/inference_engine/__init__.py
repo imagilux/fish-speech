@@ -156,8 +156,12 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
                             error=None,
                         )
                 else:
-                    # Batch mode: offload LLM, decode full sequence
-                    if _subprocess_active and hasattr(self.llama_queue, "offload_to_cpu"):
+                    # Batch mode: offload LLM before DAC decode.
+                    # On ROCm, LLM generation fragments GPU VRAM. MIOpen conv
+                    # kernels in the DAC decoder then hit corrupted page table
+                    # entries, causing GPU page faults. Offloading the LLM and
+                    # clearing the cache gives MIOpen a clean address space.
+                    if hasattr(self.llama_queue, "offload_to_cpu"):
                         self.llama_queue.offload_to_cpu()
                     segment = self.get_audio_segment(result)
                     segments.append(segment)

@@ -961,11 +961,9 @@ class Attention(nn.Module):
         if self.kv_cache is not None:
             from fish_speech.models.text2semantic.turboquant import TurboQuantKVCache
             if isinstance(self.kv_cache, TurboQuantKVCache):
-                if getattr(self, "_use_triton_int4", None) is None:
-                    from fish_speech.utils.gpu import triton_int4_kernel_safe
-                    self._use_triton_int4 = triton_int4_kernel_safe()
+                from fish_speech.utils.gpu import triton_int4_kernel_safe
 
-                if self._use_triton_int4:
+                if triton_int4_kernel_safe():
                     # Triton INT4 kernel path: store compressed, attend directly
                     self.kv_cache.store(input_pos, k, v)
                     y = self.kv_cache.attend(q, self.n_head)

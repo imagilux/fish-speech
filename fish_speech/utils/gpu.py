@@ -24,6 +24,9 @@ _TRITON_INT4_SAFE_ARCHS = {
 }
 
 
+_triton_int4_result: bool | None = None
+
+
 def triton_int4_kernel_safe() -> bool:
     """Check if the Triton INT4 attention kernel is safe on this GPU.
 
@@ -31,17 +34,25 @@ def triton_int4_kernel_safe() -> bool:
     or when explicitly enabled via USE_TRITON_INT4=1.
     Returns False on consumer ROCm GPUs (RDNA) where it causes page faults.
     """
+    global _triton_int4_result
+    if _triton_int4_result is not None:
+        return _triton_int4_result
+
     override = os.environ.get("USE_TRITON_INT4", "").lower()
     if override in ("true", "1"):
+        _triton_int4_result = True
         return True
     if override in ("false", "0"):
+        _triton_int4_result = False
         return False
 
     if not torch.cuda.is_available():
+        _triton_int4_result = False
         return False
 
     # NVIDIA GPUs — Triton is well-supported
     if not _is_rocm():
+        _triton_int4_result = True
         return True
 
     # ROCm — only safe on CDNA data center GPUs
@@ -54,6 +65,7 @@ def triton_int4_kernel_safe() -> bool:
             f"Using PyTorch dequant fallback for quantized KV cache. "
             f"Set USE_TRITON_INT4=1 to force-enable."
         )
+    _triton_int4_result = safe
     return safe
 
 # Approximate model memory requirements (in GB) for VRAM guidance.
