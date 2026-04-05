@@ -12,6 +12,50 @@ _ROCM_GFX_OVERRIDES = {
     "gfx1201": "12.0.0",  # Navi 48 — RX 9070/9070 XT → fallback to gfx1200
 }
 
+# ROCm gfx arches where the Triton INT4 attention kernel is known to work.
+# Triton's ROCm backend is stable on CDNA (data center) GPUs. Consumer RDNA
+# GPUs (gfx1100/gfx1101/gfx1102/gfx1200/gfx1201) cause HSA page faults
+# in the INT4 kernel's memory access patterns.
+_TRITON_INT4_SAFE_ARCHS = {
+    "gfx90a",   # MI250/MI250X (CDNA 2)
+    "gfx940",   # MI300A (CDNA 3)
+    "gfx941",   # MI300A (CDNA 3)
+    "gfx942",   # MI300X (CDNA 3)
+}
+
+
+def triton_int4_kernel_safe() -> bool:
+    """Check if the Triton INT4 attention kernel is safe on this GPU.
+
+    Returns True on CUDA (NVIDIA), on known-safe ROCm CDNA arches,
+    or when explicitly enabled via USE_TRITON_INT4=1.
+    Returns False on consumer ROCm GPUs (RDNA) where it causes page faults.
+    """
+    override = os.environ.get("USE_TRITON_INT4", "").lower()
+    if override in ("true", "1"):
+        return True
+    if override in ("false", "0"):
+        return False
+
+    if not torch.cuda.is_available():
+        return False
+
+    # NVIDIA GPUs — Triton is well-supported
+    if not _is_rocm():
+        return True
+
+    # ROCm — only safe on CDNA data center GPUs
+    props = torch.cuda.get_device_properties(0)
+    arch = getattr(props, "gcnArchName", "")
+    safe = arch in _TRITON_INT4_SAFE_ARCHS
+    if not safe:
+        logger.info(
+            f"Triton INT4 kernel disabled for {arch} (RDNA consumer GPU). "
+            f"Using PyTorch dequant fallback for quantized KV cache. "
+            f"Set USE_TRITON_INT4=1 to force-enable."
+        )
+    return safe
+
 # Approximate model memory requirements (in GB) for VRAM guidance.
 _MODEL_ESTIMATE_BF16 = 10.3
 _MODEL_ESTIMATE_INT8 = 5.1
