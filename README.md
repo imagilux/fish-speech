@@ -1,16 +1,17 @@
 # Fish Speech — AMD ROCm Fork
 
-**Multilingual text-to-speech on AMD GPUs.** This is the [Imagilux](https://github.com/imagilux) fork of [Fish Audio S2 Pro](https://huggingface.co/fishaudio/s2-pro), optimized for AMD RDNA 4 hardware (RX 9070 XT / gfx1201) running ROCm 7.2.
+**Multilingual text-to-speech on AMD GPUs.** This is the [Imagilux](https://github.com/imagilux) fork of [Fish Audio S2 Pro](https://huggingface.co/fishaudio/s2-pro), optimized for AMD RDNA 3/4 hardware (RX 7000/9000 series) running ROCm 7.2.
 
 > Based on [fishaudio/fish-speech](https://github.com/fishaudio/fish-speech) — see their [technical report](https://arxiv.org/abs/2603.08823) for model details.
 
 ## What's different from upstream
 
 - **Two-service architecture** — API server (GPU, models) + lightweight Gradio WebUI (HTTP client, 507MB image)
-- **ROCm RDNA 4 support** — subprocess DAC decoder for HIP context isolation, auto-detection of gfx1201/gfx1200
+- **ROCm RDNA 3/4 support** — subprocess DAC decoder for HIP context isolation, auto-detection of consumer GPU architectures (gfx1100–gfx1201)
 - **[miopen-conv-fix](https://github.com/Imagilux/miopen-conv-fix)** — our companion library that patches PyTorch's `workspace=0` bug for large conv layers via MIOpen Immediate Mode API, giving a 34x VQ decode speedup on ROCm
 - **MIOpen / Triton cache persistence** across container restarts
 - **Async chunk streaming** — 5x faster time-to-first-audio
+- **Chunked VQ decode** — long texts decoded in fixed-size chunks to stay within warmed MIOpen conv shapes, avoiding timeouts and VRAM spikes
 - **No CUDA Docker support** — ROCm + CPU only (PyTorch source code is backend-agnostic)
 
 ## Quick Start
@@ -22,14 +23,21 @@ git clone https://github.com/imagilux/fish-speech.git
 cd fish-speech
 ```
 
-Download the model (INT8 recommended for 16GB VRAM):
+Download the model (INT8 recommended for 16 GB VRAM):
 
 ```bash
-# Full precision (11GB)
+# Full precision (11 GB)
 huggingface-cli download fishaudio/s2-pro --local-dir checkpoints/s2-pro
 
-# INT8 quantized (6.5GB) — recommended for RX 9070 XT
+# INT8 quantized (6.5 GB) — recommended for RX 7000/9000 series
 huggingface-cli download fishaudio/s2-pro-int8 --local-dir checkpoints/fish-speech-s2-pro-int8
+```
+
+Copy and edit the example environment file:
+
+```bash
+cp .env.rocm_example .env
+# Edit .env — set LLAMA_CHECKPOINT_PATH and DECODER_CHECKPOINT_PATH
 ```
 
 Start both services:
@@ -74,17 +82,25 @@ docker compose -f compose.yml -f compose.rocm.yml up
 
 ## Configuration
 
-Environment variables (set in `.env` or pass to compose):
+Copy `.env.rocm_example` to `.env` and set at minimum the checkpoint paths. All other variables have sensible defaults.
+
+**Runtime variables** (read when the container starts):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BACKEND` | `rocm` | `rocm` or `cpu` |
-| `UV_EXTRA` | `rocm72` | PyTorch index (`rocm72` or `cpu`) |
-| `LLAMA_CHECKPOINT_PATH` | `checkpoints/s2-pro` | Model checkpoint path |
-| `DECODER_CHECKPOINT_PATH` | `checkpoints/s2-pro/codec.pth` | DAC codec path |
-| `VRAM_FRACTION` | `0.95` | GPU memory cap (0-1) |
-| `MAX_SEQ_LEN` | `4096` | Max sequence length |
-| `COMPILE` | `0` | Enable torch.compile |
+| `LLAMA_CHECKPOINT_PATH` | `checkpoints/s2-pro` | LLM checkpoint directory |
+| `DECODER_CHECKPOINT_PATH` | `checkpoints/s2-pro/codec.pth` | DAC codec weights |
+| `MAX_SEQ_LEN` | `32768` | KV cache sequence length (use `4096` to save ~4 GB VRAM) |
+| `VRAM_FRACTION` | `0` (no limit) | Fraction of GPU VRAM PyTorch may allocate |
+| `RENDER_GID` | `993` | Host render group GID (`stat -c '%g' /dev/kfd`) |
+| `COMPILE` | `0` | Enable `torch.compile` (experimental) |
+
+**Build args** (passed to `docker compose build`, defaults work for ROCm):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BACKEND` | `rocm` | `rocm` or `cpu` — selects the PyTorch build |
+| `UV_EXTRA` | `rocm72` | uv extras group (`rocm72` or `cpu`) |
 
 ## Development
 
