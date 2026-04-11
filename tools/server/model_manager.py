@@ -12,10 +12,12 @@ from fish_speech.utils.schema import ServeTTSRequest
 
 
 def _should_use_subprocess_decoder():
-    """Auto-detect RDNA 4 where subprocess decoder is needed.
+    """Auto-detect consumer ROCm GPUs where subprocess decoder is needed.
 
-    On gfx1201/gfx1200, MIOpen conv kernels page-fault after LLM generation
-    due to a HIP driver bug. A subprocess with its own HIP context avoids this.
+    On RDNA GPUs (gfx1100/gfx1101/gfx1102/gfx1200/gfx1201), MIOpen conv
+    kernels page-fault after LLM generation due to a HIP driver bug that
+    corrupts page tables across threads. A subprocess with its own HIP
+    context avoids this. CDNA data center GPUs (MI250/MI300) are not affected.
     """
     if not torch.cuda.is_available():
         return False
@@ -24,9 +26,25 @@ def _should_use_subprocess_decoder():
         return True
     if env in ("false", "0"):
         return False
+
+    from fish_speech.utils.gpu import _is_rocm
+
+    if not _is_rocm():
+        return False
+
+    # All consumer RDNA GPUs need the subprocess decoder.
+    # CDNA data center GPUs (gfx90a, gfx94x) don't.
     props = torch.cuda.get_device_properties(0)
     arch = getattr(props, "gcnArchName", "")
-    return "gfx1201" in arch or "gfx1200" in arch
+    # CDNA arches are safe — they don't have the HIP page table bug
+    cdna_safe = {"gfx90a", "gfx940", "gfx941", "gfx942"}
+    if arch in cdna_safe:
+        return False
+    logger.info(
+        f"ROCm consumer GPU detected ({arch}) — enabling subprocess decoder "
+        f"to avoid HIP page fault bug. Set USE_SUBPROCESS_DECODER=false to disable."
+    )
+    return True
 
 
 class ModelManager:
@@ -88,7 +106,7 @@ class ModelManager:
         )
 
         if use_subprocess:
-            logger.info("RDNA 4 detected — launching decoder subprocess")
+            logger.info("ROCm consumer GPU — launching decoder subprocess")
             self.tts_inference_engine.launch_decoder_subprocess(
                 config_name=decoder_config_name,
                 checkpoint_path=decoder_checkpoint_path,

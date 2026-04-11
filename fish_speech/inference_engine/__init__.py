@@ -156,8 +156,15 @@ class TTSInferenceEngine(ReferenceLoader, VQManager):
                             error=None,
                         )
                 else:
-                    # Batch mode: offload LLM, decode full sequence
-                    if _subprocess_active and hasattr(self.llama_queue, "offload_to_cpu"):
+                    # In-process DAC decode needs LLM offloaded to free VRAM
+                    # for the MIOpen conv kernels. Skip when subprocess decoder
+                    # is active — it has its own HIP context and memory, and
+                    # the HIP runtime on ROCm doesn't recycle freed GPU blocks,
+                    # so offload→reload cycles permanently burn VRAM until OOM.
+                    if (
+                        not _subprocess_active
+                        and hasattr(self.llama_queue, "offload_to_cpu")
+                    ):
                         self.llama_queue.offload_to_cpu()
                     segment = self.get_audio_segment(result)
                     segments.append(segment)

@@ -959,11 +959,23 @@ class Attention(nn.Module):
         q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
 
         if self.kv_cache is not None:
-            # INT4 kernel path: store compressed, attend directly
             from fish_speech.models.text2semantic.turboquant import TurboQuantKVCache
             if isinstance(self.kv_cache, TurboQuantKVCache):
-                self.kv_cache.store(input_pos, k, v)
-                y = self.kv_cache.attend(q, self.n_head)
+                from fish_speech.utils.gpu import triton_int4_kernel_safe
+
+                if triton_int4_kernel_safe():
+                    # Triton INT4 kernel path: store compressed, attend directly
+                    self.kv_cache.store(input_pos, k, v)
+                    y = self.kv_cache.attend(q, self.n_head)
+                else:
+                    # PyTorch fallback: dequant KV, use standard SDPA
+                    k, v = self.kv_cache.update(input_pos, k, v)
+                    k = k.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
+                    v = v.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
+                    y = F.scaled_dot_product_attention(
+                        q, k, v, attn_mask=mask,
+                        dropout_p=self.dropout if self.training else 0.0,
+                    )
             else:
                 # Standard bf16 path
                 k, v = self.kv_cache.update(input_pos, k, v)

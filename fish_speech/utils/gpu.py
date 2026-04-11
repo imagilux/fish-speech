@@ -12,6 +12,83 @@ _ROCM_GFX_OVERRIDES = {
     "gfx1201": "12.0.0",  # Navi 48 — RX 9070/9070 XT → fallback to gfx1200
 }
 
+# ROCm gfx arches where the Triton INT4 attention kernel is known to work.
+# Triton's ROCm backend is stable on CDNA (data center) GPUs. Consumer RDNA
+# GPUs (gfx1100/gfx1101/gfx1102/gfx1200/gfx1201) cause HSA page faults
+# in the INT4 kernel's memory access patterns.
+_TRITON_INT4_SAFE_ARCHS = {
+    "gfx90a",   # MI250/MI250X (CDNA 2)
+    "gfx940",   # MI300A (CDNA 3)
+    "gfx941",   # MI300A (CDNA 3)
+    "gfx942",   # MI300X (CDNA 3)
+}
+
+
+_triton_int4_result: bool | None = None
+
+
+def triton_int4_kernel_safe() -> bool:
+    """Check if the Triton INT4 attention kernel is safe on this GPU.
+
+    Returns True on CUDA (NVIDIA), on known-safe ROCm CDNA arches,
+    or when explicitly enabled via USE_TRITON_INT4=1.
+    Returns False on consumer ROCm GPUs (RDNA) where it causes page faults.
+    """
+    global _triton_int4_result
+    if _triton_int4_result is not None:
+        return _triton_int4_result
+
+    override = os.environ.get("USE_TRITON_INT4", "").lower()
+    if override in ("true", "1"):
+        _triton_int4_result = True
+        return True
+    if override in ("false", "0"):
+        _triton_int4_result = False
+        return False
+
+    if not torch.cuda.is_available():
+        _triton_int4_result = False
+        return False
+
+    # NVIDIA GPUs — Triton is well-supported
+    if not _is_rocm():
+        _triton_int4_result = True
+        return True
+
+    # ROCm — only safe on CDNA data center GPUs
+    props = torch.cuda.get_device_properties(0)
+    arch = getattr(props, "gcnArchName", "")
+    safe = arch in _TRITON_INT4_SAFE_ARCHS
+    if not safe:
+        logger.info(
+            f"Triton INT4 kernel disabled for {arch} (RDNA consumer GPU). "
+            f"Using PyTorch dequant fallback for quantized KV cache. "
+            f"Set USE_TRITON_INT4=1 to force-enable."
+        )
+    _triton_int4_result = safe
+    return safe
+
+def effective_kv_cache_bits() -> int:
+    """Determine the effective KV cache bit width from environment + hardware.
+
+    When KV_CACHE_BITS < 16 but the Triton INT4 kernel is unavailable (RDNA
+    consumer GPUs), the quantize → dequant → SDPA fallback path introduces
+    too much error for this TTS model, causing immediate im_end generation.
+    In that case, fall back to 16-bit KV cache automatically.
+    """
+    requested = int(os.environ.get("KV_CACHE_BITS", "16"))
+    if requested >= 16:
+        return requested
+    if triton_int4_kernel_safe():
+        return requested
+    logger.warning(
+        f"KV_CACHE_BITS={requested} requires the Triton INT4 kernel, which is "
+        f"unavailable on this GPU. Falling back to 16-bit KV cache. "
+        f"Reduce MAX_SEQ_LEN if memory is tight."
+    )
+    return 16
+
+
 # Approximate model memory requirements (in GB) for VRAM guidance.
 _MODEL_ESTIMATE_BF16 = 10.3
 _MODEL_ESTIMATE_INT8 = 5.1
@@ -72,8 +149,9 @@ def apply_vram_fraction():
 def check_vram_and_advise(checkpoint_path: str):
     """Log VRAM guidance if the model may not fit.
 
-    Estimates memory usage based on whether INT8 quantization is active
-    and the configured MAX_SEQ_LEN, then compares against available VRAM.
+    Estimates memory usage based on whether INT8 quantization is active,
+    the configured MAX_SEQ_LEN and KV_CACHE_BITS, then compares against
+    available VRAM.
     """
     if not torch.cuda.is_available():
         return
@@ -83,11 +161,12 @@ def check_vram_and_advise(checkpoint_path: str):
 
     is_int8 = "int8" in str(checkpoint_path)
     max_seq_len = int(os.environ.get("MAX_SEQ_LEN", "32768"))
+    kv_cache_bits = effective_kv_cache_bits()
 
     model_gb = _MODEL_ESTIMATE_INT8 if is_int8 else _MODEL_ESTIMATE_BF16
     decoder_gb = _DECODER_ESTIMATE_BF16
-    # KV cache: ~1.2GB at 8192, scales linearly
-    kv_gb = (max_seq_len / 8192) * 1.2
+    # KV cache: ~1.2GB at 8192 seq_len with 16-bit, scales with seq_len and bit width
+    kv_gb = (max_seq_len / 8192) * 1.2 * (kv_cache_bits / 16)
     # Inference scratch/activations overhead
     overhead_gb = 0.5
 
@@ -97,7 +176,7 @@ def check_vram_and_advise(checkpoint_path: str):
         f"GPU: {props.name}, VRAM: {total_gb:.1f}GB | "
         f"Estimated usage: {estimated_gb:.1f}GB "
         f"(model={'INT8' if is_int8 else 'bf16'}, "
-        f"seq_len={max_seq_len}, decoder=bf16)"
+        f"seq_len={max_seq_len}, kv_cache={kv_cache_bits}bit, decoder=bf16)"
     )
 
     if estimated_gb > total_gb:
@@ -110,9 +189,14 @@ def check_vram_and_advise(checkpoint_path: str):
             )
         if max_seq_len > 4096:
             suggestions.append(
-                f"reduce MAX_SEQ_LEN (current: {max_seq_len}, try 4096 to save ~{(max_seq_len - 4096) / 8192 * 1.2:.1f}GB)"
+                f"reduce MAX_SEQ_LEN (current: {max_seq_len}, try 4096 to save ~{(max_seq_len - 4096) / 8192 * 1.2 * (kv_cache_bits / 16):.1f}GB)"
             )
-        suggestions.append("set OFFLOAD_WEIGHTS_TO_CPU=true to run slow layers on CPU")
+        if kv_cache_bits > 4:
+            suggestions.append(
+                f"set KV_CACHE_BITS=4 (current: {kv_cache_bits}, saves ~{kv_gb - kv_gb * 4 / kv_cache_bits:.1f}GB)"
+            )
+        if not is_int8:
+            suggestions.append("set OFFLOAD_WEIGHTS_TO_CPU=true to run slow layers on CPU (bf16 models only)")
         suggestions.append("set VRAM_FRACTION=0.95 to prevent system freeze on OOM")
 
         logger.warning(

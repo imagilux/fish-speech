@@ -16,6 +16,10 @@ DECODE_PAD_TO = 512
 
 CHUNK_DECODE_PAD_TO = 64  # Smaller pad target for streaming chunks
 
+# Overlap tokens for cross-chunk decode continuity (conv receptive field).
+# Matches STREAM_LEFT_CONTEXT in the inference engine.
+DECODE_OVERLAP = 25
+
 
 def _pad_decode_truncate(model, codes, device, pad_multiple=DECODE_PAD_TO):
     """Pad codes to consistent shape, decode via DAC, truncate to original length.
@@ -59,9 +63,9 @@ def _decoder_subprocess_worker(
 ):
     """Persistent subprocess that owns the DAC decoder in its own HIP context.
 
-    On RDNA 4 (gfx1201), MIOpen conv kernels page-fault after LLM generation
-    corrupts the parent process's HIP page tables. This subprocess gets a clean
-    HIP context that never touches LLM allocations.
+    On ROCm consumer GPUs (RDNA 3/4), MIOpen conv kernels page-fault after
+    LLM generation corrupts the parent process's HIP page tables. This
+    subprocess gets a clean HIP context that never touches LLM allocations.
     """
     import traceback
 
@@ -222,7 +226,7 @@ class VQManager:
         if self._decoder_conn is not None:
             return self._decode_via_subprocess(codes)
 
-        # In-process fallback (non-RDNA4 or subprocess not active)
+        # In-process fallback (CDNA data center GPUs or subprocess not active)
         if isinstance(self.decoder_model, DAC):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -239,11 +243,15 @@ class VQManager:
         raise ValueError(f"Unknown model type: {type(self.decoder_model)}")
 
     def _decode_via_subprocess(self, codes: torch.Tensor) -> torch.Tensor:
-        """Send codes to decoder subprocess, receive audio."""
+        """Send codes to decoder subprocess, receive audio.
+
+        For sequences longer than DECODE_PAD_TO, splits into overlapping
+        chunks so each stays within the warmed-up conv shape — avoids both
+        MIOpen auto-tuning delays and VRAM spikes from larger pad sizes.
+        """
         if not self._decoder_process.is_alive():
             logger.error("Decoder subprocess died, attempting in-process fallback")
             self.shutdown_decoder_subprocess()
-            # Move parent DAC back to GPU for in-process decode
             target_device = codes.device
             try:
                 if self.decoder_model.device != target_device:
@@ -256,19 +264,85 @@ class VQManager:
                 ) from e
             return self.decode_vq_tokens(codes)
 
-        t0 = time.perf_counter()
-        # Use smaller pad for short sequences (streaming chunks)
-        pad_mult = CHUNK_DECODE_PAD_TO if codes.shape[-1] <= CHUNK_DECODE_PAD_TO else DECODE_PAD_TO
-        self._decoder_conn.send({"codes": codes.cpu().numpy(), "pad_multiple": pad_mult})
+        seq_len = codes.shape[-1]
 
-        if not self._decoder_conn.poll(timeout=30):
-            raise RuntimeError("Decoder subprocess timed out (30s)")
+        # Short sequences: single-shot decode (fits in warmed-up shape)
+        if seq_len <= DECODE_PAD_TO:
+            return self._subprocess_decode_single(codes)
+
+        # Long sequences: chunked decode to stay within warmed-up pad sizes.
+        frame_length = getattr(self, '_frame_length', 2048)
+        logger.info(
+            f"Chunked decode: {seq_len} tokens (>{DECODE_PAD_TO}), "
+            f"splitting with {DECODE_OVERLAP}-token overlap"
+        )
+
+        t0 = time.perf_counter()
+        chunks_audio = []
+        chunk_start = 0
+
+        while chunk_start < seq_len:
+            context_start = (
+                max(0, chunk_start - DECODE_OVERLAP) if chunk_start > 0 else 0
+            )
+            chunk_end = min(context_start + DECODE_PAD_TO, seq_len)
+            chunk_codes = codes[:, context_start:chunk_end]
+
+            audio = self._subprocess_decode_single(chunk_codes, log=False)
+
+            # Trim context audio (not needed for first chunk)
+            if chunk_start > context_start:
+                context_tokens = chunk_start - context_start
+                trim_samples = context_tokens * frame_length
+                if 0 < trim_samples < audio.shape[-1]:
+                    audio = audio[trim_samples:]
+
+            chunks_audio.append(audio)
+            chunk_start = chunk_end
+
+        result = (
+            torch.cat(chunks_audio, dim=-1)
+            if len(chunks_audio) > 1
+            else chunks_audio[0]
+        )
+        logger.info(
+            f"Chunked decode complete: {len(chunks_audio)} chunks, "
+            f"{time.perf_counter() - t0:.3f}s total"
+        )
+        return result
+
+    def _subprocess_decode_single(
+        self, codes: torch.Tensor, *, log: bool = True,
+    ) -> torch.Tensor:
+        """Send a single codes tensor to subprocess for decode."""
+        # Drain any stale responses left from a previous timeout
+        while self._decoder_conn.poll(timeout=0):
+            logger.warning("Draining stale response from decoder subprocess")
+            try:
+                self._decoder_conn.recv()
+            except (EOFError, OSError):
+                break
+
+        t0 = time.perf_counter()
+        pad_mult = (
+            CHUNK_DECODE_PAD_TO
+            if codes.shape[-1] <= CHUNK_DECODE_PAD_TO
+            else DECODE_PAD_TO
+        )
+        self._decoder_conn.send({
+            "codes": codes.cpu().numpy(),
+            "pad_multiple": pad_mult,
+        })
+
+        if not self._decoder_conn.poll(timeout=60):
+            raise RuntimeError("Decoder subprocess timed out (60s)")
 
         response = self._decoder_conn.recv()
         if "error" in response:
             raise RuntimeError(f"Decoder subprocess error: {response['error']}")
 
-        logger.info(f"VQ decode (subprocess): {time.perf_counter() - t0:.3f}s")
+        if log:
+            logger.info(f"VQ decode (subprocess): {time.perf_counter() - t0:.3f}s")
         return torch.from_numpy(response["audio"])
 
     def _encode_via_subprocess(
