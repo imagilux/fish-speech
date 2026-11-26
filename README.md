@@ -91,6 +91,7 @@ Copy `.env.rocm_example` to `.env` and set at minimum the checkpoint paths. All 
 | `LLAMA_CHECKPOINT_PATH` | `checkpoints/s2-pro` | LLM checkpoint directory |
 | `DECODER_CHECKPOINT_PATH` | `checkpoints/s2-pro/codec.pth` | DAC codec weights |
 | `MAX_SEQ_LEN` | `4096` | KV cache size in positions. A request needs its reference audio (21.5 per second) and text, plus roughly 25 per second of generated speech: 4096 is about two minutes in one take for ~0.6 GB of VRAM. It does not affect speed. Unset means the model's maximum, 32768 |
+| `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL` | `0` | AOTriton attention on GPUs where PyTorch gates it as experimental; used for the prompt pass and the codec, not for token-by-token decoding |
 | `VRAM_FRACTION` | `0` (no limit) | Fraction of GPU VRAM PyTorch may allocate |
 | `RENDER_GID` | `993` | Host render group GID (`stat -c '%g' /dev/kfd`) |
 | `COMPILE` | `0` | Enable `torch.compile` (experimental) |
