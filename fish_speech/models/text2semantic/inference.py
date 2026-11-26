@@ -290,7 +290,15 @@ def generate(
     if not hasattr(model, "_cache_setup_done") or not model._cache_setup_done:
         from fish_speech.utils.gpu import effective_kv_cache_bits
 
-        max_seq_len = int(os.environ.get("MAX_SEQ_LEN", model.config.max_seq_len))
+        # Size the cache to the work, not to the model's maximum. Every decode
+        # step attends over the whole allocation, so a cache of 32768 makes each
+        # token of a few-hundred-token utterance pay for positions it will never
+        # use. Measured on a consumer APU: 5x on decode throughput (0.84 -> 4.23
+        # tok/s), 2x end-to-end. The effect is worst where memory bandwidth is
+        # scarcest, i.e. on integrated GPUs sharing DRAM with the CPU.
+        max_seq_len = int(os.environ.get("MAX_SEQ_LEN", 0)) or min(
+            model.config.max_seq_len, T + max_new_tokens + 64
+        )
         kv_cache_bits = effective_kv_cache_bits()
         with torch.device(device):
             model.setup_caches(
