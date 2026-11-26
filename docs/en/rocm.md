@@ -8,10 +8,10 @@ This fork adds full ROCm support for AMD RDNA 4 GPUs (RX 9070 XT / gfx1201), ach
 # Clone and configure
 git clone https://github.com/imagilux/fish-speech.git
 cd fish-speech
-cp .env.example .env  # Edit: BACKEND=rocm, COMPILE=0
+cp .env.rocm_example .env  # Edit: set the checkpoint paths
 
 # Build and run
-BACKEND=rocm UV_EXTRA=rocm72 docker compose -f compose.yml -f compose.rocm.yml --profile server up -d
+BACKEND=rocm UV_EXTRA=rocm72 docker compose -f compose.yml -f compose.rocm.yml up -d server
 
 # Test
 curl -X POST http://localhost:8080/v1/tts \
@@ -107,7 +107,7 @@ Key settings for RDNA 4:
 |---|---|---|
 | `COMPILE` | `0` | torch.compile is slower on gfx1201 |
 | `VRAM_FRACTION` | `0.95` | Safety cap, prevents GPU hang on OOM |
-| `MAX_SEQ_LEN` | `4096` | Limits KV cache VRAM (~0.5GB vs ~4GB at 32768) |
+| `MAX_SEQ_LEN` | `4096` | Limits KV cache VRAM (~0.6GB vs ~4.8GB at 32768) |
 | `MIOPEN_FIND_MODE` | `3` | Fast heuristic search |
 | `HSA_ENABLE_SDMA` | `0` | Disables async DMA (stability) |
 | `GPU_MAX_HW_QUEUES` | `1` | Single GPU queue (stability) |
