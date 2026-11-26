@@ -27,17 +27,30 @@ services:
       - triton-cache:/app/.triton
     environment:
       HSA_ENABLE_SDMA: "0"
+      # One hardware queue per process. ROCm hands each process several by
+      # default and the RDNA3.5 firmware faults once they are oversubscribed:
+      # HSA_STATUS_ERROR_EXCEPTION plus a GPU coredump, which can take the host
+      # with it. Measured on a Radeon 8060S: 4 concurrent workers lost 2 without
+      # this, 4/4 clean with it, at 1.71x throughput.
       GPU_MAX_HW_QUEUES: "1"
       HSA_USE_SVM: "0"
       TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL: "${TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL:-1}"
       PYTORCH_HIP_ALLOC_CONF: "garbage_collection_threshold:0.7,max_split_size_mb:4096"
       MIOPEN_FIND_MODE: "${MIOPEN_FIND_MODE:-3}"
+      # The server warns that memory-efficient attention is available and then
+      # silently runs the slow path unless this is set. With COMPILE=1 it
+      # measured 6.25x on decode (2.5 s/token -> 2.5 tokens/s) on gfx1151.
+      TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL: "${TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL:-1}"
       MIOPEN_CUSTOM_CACHE_DIR: /app/.cache/miopen
       MIOPEN_USER_DB_PATH: /app/.config/miopen
       TRITON_CACHE_DIR: /app/.triton
       TORCHINDUCTOR_CACHE_DIR: /app/.triton/inductor
       VRAM_FRACTION: "${VRAM_FRACTION:-0}"
-      MAX_SEQ_LEN: "${MAX_SEQ_LEN:-32768}"
+      # Sized to the work, not the model maximum: each decode step attends over
+      # the whole cache, so 32768 makes a short utterance pay for positions it
+      # never uses. 2560 fits a ~500-char chunk plus max_new_tokens. Measured
+      # RTF 4.10 -> 1.96 end-to-end on gfx1151.
+      MAX_SEQ_LEN: "${MAX_SEQ_LEN:-2560}"
       KV_CACHE_BITS: "${KV_CACHE_BITS:-4}"
       MPLCONFIGDIR: /app/.cache/matplotlib
       OFFLOAD_WEIGHTS_TO_CPU: "${OFFLOAD_WEIGHTS_TO_CPU:-false}"
