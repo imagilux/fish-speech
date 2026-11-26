@@ -404,6 +404,7 @@ class BaseTransformer(nn.Module):
         audio_masks: Optional[Tensor] = None,
         audio_parts: Optional[Tensor] = None,
         return_all: bool = False,
+        kv_len: Optional[int] = None,
     ) -> BaseTransformerForwardResult:
 
         # When CPU offload is active, embeddings are on CPU — move input there
@@ -446,13 +447,26 @@ class BaseTransformer(nn.Module):
             else:
                 logger.warning("audio_parts provided but model has no audio_projector")
 
+        cache_capacity = (
+            self.max_seq_len if self.max_seq_len > 0 else self.config.max_seq_len
+        )
         if input_pos is None:
             input_pos = torch.arange(inp.shape[-1], device=x.device)
-            max_seq_len = inp.shape[-1]
+            active_kv_len = inp.shape[-1]
         else:
-            max_seq_len = self.max_seq_len
+            active_kv_len = cache_capacity if kv_len is None else kv_len
 
-        mask = self.causal_mask[None, None, input_pos, :max_seq_len]  # (B, N, Q, K)
+        # A position past the cache would be written out of bounds, which on
+        # ROCm aborts the process without a message. kv_len is a Python int,
+        # so this check costs no device sync.
+        if not 1 <= active_kv_len <= cache_capacity:
+            raise ValueError(
+                f"kv_len must be between 1 and {cache_capacity}, got {active_kv_len}"
+            )
+
+        mask = self.causal_mask[
+            None, None, input_pos, :active_kv_len
+        ]  # (B, N, Q, active K)
         freqs_cis = self.freqs_cis[input_pos]
 
         if getattr(self, "_layer_streamer", None) is not None:
@@ -698,9 +712,12 @@ class NaiveTransformer(BaseTransformer):
         return self.decode(result)
 
     def forward_generate(
-        self, x: Tensor, input_pos: Optional[Tensor] = None
+        self,
+        x: Tensor,
+        input_pos: Optional[Tensor] = None,
+        kv_len: Optional[int] = None,
     ) -> TransformerForwardResult:
-        result = super().forward_generate(x, input_pos)
+        result = super().forward_generate(x, input_pos, kv_len=kv_len)
         return self.decode(result)
 
 
@@ -873,8 +890,15 @@ class DualARTransformer(BaseTransformer):
         input_pos: Optional[Tensor] = None,
         audio_masks: Optional[Tensor] = None,
         audio_parts: Optional[Tensor] = None,
+        kv_len: Optional[int] = None,
     ) -> TransformerForwardResult:
-        x = super().forward_generate(x, input_pos, audio_masks, audio_parts)
+        x = super().forward_generate(
+            x,
+            input_pos,
+            audio_masks,
+            audio_parts,
+            kv_len=kv_len,
+        )
         x.hidden_states = self.fast_project_in(x.hidden_states)
         return x
 
@@ -970,6 +994,7 @@ class Attention(nn.Module):
                 else:
                     # PyTorch fallback: dequant KV, use standard SDPA
                     k, v = self.kv_cache.update(input_pos, k, v)
+                    k, v = self._active_prefix(k, v, mask)
                     k = k.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
                     v = v.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
                     y = F.scaled_dot_product_attention(
@@ -979,6 +1004,7 @@ class Attention(nn.Module):
             else:
                 # Standard bf16 path
                 k, v = self.kv_cache.update(input_pos, k, v)
+                k, v = self._active_prefix(k, v, mask)
                 k = k.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
                 v = v.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
 
@@ -1018,6 +1044,17 @@ class Attention(nn.Module):
         y = y.transpose(1, 2).contiguous().view(bsz, seqlen, q_size)
 
         return self.wo(y)
+
+    @staticmethod
+    def _active_prefix(
+        k: Tensor, v: Tensor, mask: Optional[Tensor]
+    ) -> tuple[Tensor, Tensor]:
+        # Keep the cache allocated at max_seq_len, but repeat and attend only
+        # to the prefix populated so far: the mask is exactly that wide.
+        if mask is None:
+            return k, v
+        active_kv_len = mask.shape[-1]
+        return k[:, :, :active_kv_len], v[:, :, :active_kv_len]
 
     def eq_scaled_dot_product_attention(
         self,
