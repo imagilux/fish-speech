@@ -37,7 +37,16 @@ from fish_speech.models.text2semantic.llama import (
     BaseTransformer,
     DualARTransformer,
     NaiveTransformer,
+    find_multiple,
 )
+
+
+def kv_cache_limit(model: BaseTransformer) -> int:
+    """Positions the KV cache may hold: MAX_SEQ_LEN, at most the model's own limit."""
+    requested = int(os.environ.get("MAX_SEQ_LEN") or 0)
+    if requested <= 0:
+        return model.config.max_seq_len
+    return min(requested, model.config.max_seq_len)
 
 
 def multinomial_sample_one_no_sync(probs_sort):
@@ -104,12 +113,14 @@ def decode_one_token_ar(
     audio_masks: torch.Tensor,
     audio_parts: torch.Tensor,
     previous_tokens: Optional[torch.Tensor] = None,
+    kv_len: Optional[int] = None,
 ) -> torch.Tensor:
     forward_result = model.forward_generate(
         x,
         input_pos,
         audio_masks=audio_masks,
         audio_parts=audio_parts,
+        kv_len=kv_len,
     )
     logits = forward_result.logits  # (1, 1, vocab_size)
     hidden_states = forward_result.hidden_states
@@ -195,7 +206,13 @@ def decode_n_tokens(
     decode_one_token=decode_one_token_ar,
     on_chunk: Optional[Callable] = None,
     chunk_size: int = 0,
+    kv_start_pos: Optional[int] = None,
 ):
+    if kv_start_pos is None:
+        # Compatibility fallback for direct callers. The production generation
+        # path passes the Python position explicitly to avoid a device sync.
+        kv_start_pos = int(input_pos[0].item())
+
     # Rolling window for RAS (Repetition Aware Sampling)
     previous_tokens = torch.zeros(
         (model.config.num_codebooks + 1, RAS_WIN_SIZE),
@@ -221,6 +238,7 @@ def decode_n_tokens(
                 semantic_logit_bias=semantic_logit_bias,
                 audio_masks=audio_masks,
                 audio_parts=audio_parts,
+                kv_len=kv_start_pos + i + 1,
             ).clone()
 
         input_pos += 1
@@ -238,6 +256,9 @@ def decode_n_tokens(
 
         if cur_token[0, 0, -1] == im_end_id:
             break
+
+    if not new_tokens:  # num_new_tokens <= 0
+        return cur_token.new_empty((model.config.num_codebooks + 1, 0))
 
     del cur_token
 
@@ -267,47 +288,38 @@ def generate(
     T = prompt.size(1)
     prompt = prompt[None].repeat(num_samples, 1, 1)
 
-    if T >= model.config.max_seq_len:
+    # Every position, prompt or generated, takes one slot in the KV cache.
+    limit = kv_cache_limit(model)
+    if T >= limit:
         raise ValueError(
-            f"Input sequence length {T} exceeds max_seq_len {model.config.max_seq_len}"
+            f"Prompt takes {T} positions but the KV cache is limited to {limit}: "
+            "shorten the reference audio or the text, or raise MAX_SEQ_LEN "
+            f"(the model allows {model.config.max_seq_len})"
         )
 
-    if max_new_tokens:
-        if T + max_new_tokens > model.config.max_seq_len:
-            max_new_tokens = model.config.max_seq_len - T
-
-        T_new = T + max_new_tokens
-    else:
-        T_new = model.config.max_seq_len
-        max_new_tokens = T_new - T
+    # No limit (0) and a request for more than fits both stop where the cache ends.
+    if not max_new_tokens or T + max_new_tokens > limit:
+        max_new_tokens = limit - T
 
     device = prompt.device
     dtype = next(
         model.parameters()
     ).dtype  # model weight dtype (bfloat16), NOT prompt dtype (int32)
 
-    # Critical fix: Only set up cache on first run or when necessary
-    if not hasattr(model, "_cache_setup_done") or not model._cache_setup_done:
+    # Allocate the cache on first use and grow it when a request needs more.
+    # Attention only reads the filled prefix, so its size costs memory, not
+    # speed. It grows in steps of 1024 positions so that a slightly longer
+    # request does not reallocate every layer's cache.
+    if model.max_seq_len < T + max_new_tokens:
         from fish_speech.utils.gpu import effective_kv_cache_bits
 
-        # Size the cache to the work, not to the model's maximum. Every decode
-        # step attends over the whole allocation, so a cache of 32768 makes each
-        # token of a few-hundred-token utterance pay for positions it will never
-        # use. Measured on a consumer APU: 5x on decode throughput (0.84 -> 4.23
-        # tok/s), 2x end-to-end. The effect is worst where memory bandwidth is
-        # scarcest, i.e. on integrated GPUs sharing DRAM with the CPU.
-        max_seq_len = int(os.environ.get("MAX_SEQ_LEN", 0)) or min(
-            model.config.max_seq_len, T + max_new_tokens + 64
-        )
-        kv_cache_bits = effective_kv_cache_bits()
         with torch.device(device):
             model.setup_caches(
                 max_batch_size=1,  # Fixed to 1, avoid dynamic changes
-                max_seq_len=max_seq_len,
-                dtype=next(model.parameters()).dtype,
-                kv_cache_bits=kv_cache_bits,
+                max_seq_len=min(limit, find_multiple(T + max_new_tokens, 1024)),
+                dtype=dtype,
+                kv_cache_bits=effective_kv_cache_bits(),
             )
-        model._cache_setup_done = True
 
     codebook_dim = 1 + model.config.num_codebooks
 
@@ -338,7 +350,8 @@ def generate(
     ] = 0.0
 
     # [MODIFIED] Use tokenizer.get_token_id (Wrapper method)
-    semantic_logit_bias[0, 0, model.tokenizer.get_token_id(IM_END_TOKEN)] = 0.0
+    im_end_id = model.tokenizer.get_token_id(IM_END_TOKEN)
+    semantic_logit_bias[0, 0, im_end_id] = 0.0
 
     prefill_decode = decode_one_token_ar
 
@@ -357,7 +370,8 @@ def generate(
         semantic_logit_bias,
         audio_masks,
         audio_parts,
-    )
+        kv_len=T,
+    ).clone()
     seq[:, T : T + 1] = first_token
 
     if torch.cuda.is_available():
@@ -388,6 +402,7 @@ def generate(
         decode_one_token=decode_one_token,
         on_chunk=on_chunk,
         chunk_size=chunk_size,
+        kv_start_pos=T,
     )
 
     if torch.cuda.is_available():
@@ -398,7 +413,7 @@ def generate(
     logger.info(
         f"Decode: {n_decoded} tokens in {decode_time:.3f}s "
         f"({n_decoded / decode_time:.2f} tok/s, "
-        f"{decode_time / n_decoded * 1000:.0f}ms/tok)"
+        f"{decode_time / max(n_decoded, 1) * 1000:.0f}ms/tok)"
     )
     logger.info(
         f"Total generate: prefill={t_prefill_end - t_prefill_start:.3f}s + "
@@ -408,6 +423,13 @@ def generate(
 
     seq = seq[:, : T + 1 + x.size(1)]
     seq[:, T + 1 :] = x
+
+    if seq.size(1) >= limit and seq[0, -1] != im_end_id:
+        logger.warning(
+            f"Generation reached the KV cache limit ({limit} positions) before "
+            "the model ended the utterance, so the audio is cut short: send "
+            "less text per request or raise MAX_SEQ_LEN"
+        )
 
     # Clean up temporary variables
     del first_token, x, prompt, empty, input_pos
@@ -433,9 +455,6 @@ def init_model(checkpoint_path, device, precision, compile=False):
     model.fixed_top_p = torch.tensor(0.7, device=device, dtype=torch.float)
     model.fixed_repetition_penalty = torch.tensor(1.5, device=device, dtype=torch.float)
 
-    # Mark whether cache has been initialized
-    model._cache_setup_done = False
-
     if compile:
         logger.info("Compiling function...")
         decode_one_token = torch.compile(
@@ -443,6 +462,7 @@ def init_model(checkpoint_path, device, precision, compile=False):
             backend="inductor" if torch.cuda.is_available() else "aot_eager",
             mode="default" if torch.cuda.is_available() else None,
             fullgraph=True,
+            dynamic=True,
         )
 
     return model.eval(), decode_one_token
@@ -929,7 +949,7 @@ def launch_thread_safe_queue(
         )
         model_ref[0] = model
 
-        max_seq_len = int(os.environ.get("MAX_SEQ_LEN", model.config.max_seq_len))
+        max_seq_len = kv_cache_limit(model)
 
         from fish_speech.utils.gpu import effective_kv_cache_bits
 
@@ -1093,7 +1113,7 @@ def main(
     with torch.device(device):
         model.setup_caches(
             max_batch_size=1,
-            max_seq_len=model.config.max_seq_len,
+            max_seq_len=kv_cache_limit(model),
             dtype=next(model.parameters()).dtype,
             kv_cache_bits=kv_cache_bits,
         )

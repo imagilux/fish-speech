@@ -37,7 +37,7 @@ services:
       TRITON_CACHE_DIR: /app/.triton
       TORCHINDUCTOR_CACHE_DIR: /app/.triton/inductor
       VRAM_FRACTION: "${VRAM_FRACTION:-0}"
-      MAX_SEQ_LEN: "${MAX_SEQ_LEN:-1024}"
+      MAX_SEQ_LEN: "${MAX_SEQ_LEN:-4096}"
       KV_CACHE_BITS: "${KV_CACHE_BITS:-4}"
       MPLCONFIGDIR: /app/.cache/matplotlib
       OFFLOAD_WEIGHTS_TO_CPU: "${OFFLOAD_WEIGHTS_TO_CPU:-false}"
